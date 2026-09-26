@@ -1,0 +1,21 @@
+# غير مطلوب لتشغيل v1 — الآن كل شيء يعمل محلياً بدون قواعد بيانات.
+# جاهز للمرحلة القادمة عندما نحتاج تخزين دائم وقناة اتصال مع الـ cBot.
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: xaubot
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: xaubot
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
