@@ -116,6 +116,53 @@ class _FakeProtoMessage:
         object.__setattr__(self, name, value)
         return value
 
+    def SerializeToString(self) -> bytes:
+        """تسلسل مبسّط لكن حقيقي الشكل: بايتات عبر pickle لكل الحقول المعروفة."""
+        import pickle
+
+        state = {
+            key: value
+            for key, value in vars(self).items()
+            if not key.startswith("_")
+        }
+        return pickle.dumps(state)
+
+    def ParseFromString(self, data: bytes) -> None:
+        """فكّ التسلسل إلى نفس الكائن (يكمل ثنائية SerializeToString أعلاه)."""
+        import pickle
+
+        vars(self).update(pickle.loads(data))
+
+
+class _FakeRawEnvelope:
+    """نسخة مزيفة من مغلّف الأسلاك الخام ProtoMessage (payloadType + payload=bytes).
+
+    محاكاة لسلوك المكتبة الرسمية: client.send() يعيد هذا المغلّف دائماً دون فكّه،
+    فحقل payloadType/payload مشتركان بين كل الرسائل — لهذا تُدار كموصّفات على
+    مستوى الصنف لا كخصائص مثيل.
+    """
+
+    payloadType = 0
+    payload = b""
+
+    def __init__(self, payloadType: int | None = None, payload: bytes = b"") -> None:
+        if payloadType is not None:
+            self.payloadType = payloadType
+        self.payload = payload
+
+    def __repr__(self) -> str:  # مثل الطباعة الحقيقية للرسائل
+        return f"payloadType: {self.payloadType}\npayload: {self.payload!r}"
+
+
+# أرقام payloadType الرسمية من رسائل المكتبة الحقيقية (تحقق بروتوكولي فعلي، لا أرقام مخترعة)
+_APP_AUTH_RES_PT = 2101
+_ACCOUNT_AUTH_RES_PT = 2103
+_SYMBOLS_LIST_RES_PT = 2115
+_SYMBOL_BY_ID_RES_PT = 2117
+_GET_TRENDBARS_RES_PT = 2138
+_ERROR_RES_PT = 2142
+_HEARTBEAT_PT = 51
+
 
 class _FakeTrendbarPeriod:
     """بديل مبسط لـ ProtoOATrendbarPeriod (قيم enum الرسمية)."""
@@ -143,6 +190,22 @@ def _make_fake_pb2_module(name: str, **symbols: object) -> types.ModuleType:
     for key, value in symbols.items():
         setattr(module, key, value)
     return module
+
+
+def _field(name: str) -> property:
+    """موصّف بيانات لحقل protobuf مزيف (يُقرأ ويُكتب كخصائص عادية)."""
+
+    def getter(self):
+        value = vars(self).get(name)
+        if value is None:  # نفس سلوك __getattr__ القديم: قائمة repeated فارغة عند أول وصول
+            value = []
+            vars(self)[name] = value
+        return value
+
+    def setter(self, value) -> None:
+        vars(self)[name] = value
+
+    return property(getter, setter)
 
 
 def _build_fake_modules(fake_client_cls, fake_reactor) -> types.ModuleType:
@@ -180,26 +243,50 @@ def _build_fake_modules(fake_client_cls, fake_reactor) -> types.ModuleType:
 
     fake_common = _make_fake_pb2_module(
         "ctrader_open_api.messages.OpenApiCommonMessages_pb2",
-        ProtoHeartbeatEvent=type("ProtoHeartbeatEvent", (_FakeProtoMessage,), {}),
+        # مغلّف الأسلاك الخام — كود الإنتاج يفحص isinstance(response, ProtoMessage) ثم يفكّه
+        ProtoMessage=_FakeRawEnvelope,
+        ProtoHeartbeatEvent=type(
+            "ProtoHeartbeatEvent", (_FakeProtoMessage,), {"payloadType": _HEARTBEAT_PT}
+        ),
         ProtoOAPayloadType=type("ProtoOAPayloadType", (_FakeProtoMessage,), {}),
     )
+
+    class _FakeApplicationAuthRes(_FakeProtoMessage):
+        payloadType = _APP_AUTH_RES_PT
+
+    class _FakeAccountAuthRes(_FakeProtoMessage):
+        payloadType = _ACCOUNT_AUTH_RES_PT
+
+    class _FakeSymbolsListRes(_FakeProtoMessage):
+        payloadType = _SYMBOLS_LIST_RES_PT
+        symbol = _field("symbol")
+
+    class _FakeSymbolByIdRes(_FakeProtoMessage):
+        payloadType = _SYMBOL_BY_ID_RES_PT
+        symbol = _field("symbol")
+
+    class _FakeGetTrendbarsRes(_FakeProtoMessage):
+        payloadType = _GET_TRENDBARS_RES_PT
+        trendbar = _field("trendbar")
+
+    class _FakeErrorRes(_FakeProtoMessage):
+        payloadType = _ERROR_RES_PT
+        errorCode = _field("errorCode")
+        description = _field("description")
+
     fake_messages = _make_fake_pb2_module(
         "ctrader_open_api.messages.OpenApiMessages_pb2",
         ProtoOAAccountAuthReq=type("ProtoOAAccountAuthReq", (_FakeProtoMessage,), {}),
-        ProtoOAAccountAuthRes=type("ProtoOAAccountAuthRes", (_FakeProtoMessage,), {}),
+        ProtoOAAccountAuthRes=_FakeAccountAuthRes,
         ProtoOAApplicationAuthReq=type("ProtoOAApplicationAuthReq", (_FakeProtoMessage,), {}),
-        ProtoOAApplicationAuthRes=type("ProtoOAApplicationAuthRes", (_FakeProtoMessage,), {}),
-        ProtoOAErrorRes=type(
-            "ProtoOAErrorRes",
-            (_FakeProtoMessage,),
-            {"errorCode": "GENERIC_ERROR", "description": "fake error"},
-        ),
+        ProtoOAApplicationAuthRes=_FakeApplicationAuthRes,
+        ProtoOAErrorRes=_FakeErrorRes,
         ProtoOAGetTrendbarsReq=type("ProtoOAGetTrendbarsReq", (_FakeProtoMessage,), {}),
-        ProtoOAGetTrendbarsRes=type("ProtoOAGetTrendbarsRes", (_FakeProtoMessage,), {}),
+        ProtoOAGetTrendbarsRes=_FakeGetTrendbarsRes,
         ProtoOASymbolByIdReq=type("ProtoOASymbolByIdReq", (_FakeProtoMessage,), {}),
-        ProtoOASymbolByIdRes=type("ProtoOASymbolByIdRes", (_FakeProtoMessage,), {}),
+        ProtoOASymbolByIdRes=_FakeSymbolByIdRes,
         ProtoOASymbolsListReq=type("ProtoOASymbolsListReq", (_FakeProtoMessage,), {}),
-        ProtoOASymbolsListRes=type("ProtoOASymbolsListRes", (_FakeProtoMessage,), {}),
+        ProtoOASymbolsListRes=_FakeSymbolsListRes,
     )
     fake_model = _make_fake_pb2_module(
         "ctrader_open_api.messages.OpenApiModelMessages_pb2",
@@ -281,25 +368,34 @@ def fake_feed_factory(monkeypatch):
 
         def send(self, message, clientMsgId=None, responseTimeoutInSeconds=5, **params):  # noqa: ARG002
             state["sent"].append(message)
+            # نفس سلوك الخادم+المكتبة الحقيقيين: كل استجابة تخرج مغلّفةً في ProtoMessage خام
+            def enveloped(result, payload_type: int):
+                return _FakeDeferred(
+                    _FakeRawEnvelope(payloadType=payload_type, payload=result.SerializeToString())
+                )
+
             if isinstance(message, fake_messages.ProtoOAApplicationAuthReq):
-                return _FakeDeferred(fake_messages.ProtoOAApplicationAuthRes())
+                return enveloped(fake_messages.ProtoOAApplicationAuthRes(), _APP_AUTH_RES_PT)
             if isinstance(message, fake_messages.ProtoOAAccountAuthReq):
-                return _FakeDeferred(fake_messages.ProtoOAAccountAuthRes())
+                return enveloped(fake_messages.ProtoOAAccountAuthRes(), _ACCOUNT_AUTH_RES_PT)
             if isinstance(message, fake_messages.ProtoOASymbolsListReq):
                 res = fake_messages.ProtoOASymbolsListRes()
                 res.symbol.append(types.SimpleNamespace(symbolId=845, symbolName="XAUUSD"))
-                return _FakeDeferred(res)
+                return enveloped(res, _SYMBOLS_LIST_RES_PT)
             if isinstance(message, fake_messages.ProtoOASymbolByIdReq):
                 res = fake_messages.ProtoOASymbolByIdRes()
                 res.symbol.append(types.SimpleNamespace(symbolId=845, digits=2))
-                return _FakeDeferred(res)
+                return enveloped(res, _SYMBOL_BY_ID_RES_PT)
             if isinstance(message, fake_messages.ProtoOAGetTrendbarsReq):
                 res = fake_messages.ProtoOAGetTrendbarsRes()
                 for trendbar in state["trendbars"]:
                     res.trendbar.append(trendbar)
-                return _FakeDeferred(res)
+                return enveloped(res, _GET_TRENDBARS_RES_PT)
             if type(message).__name__ == "ProtoHeartbeatEvent":
-                return _FakeDeferred(None)
+                heartbeat = type(message)()
+                return _FakeDeferred(
+                    _FakeRawEnvelope(payloadType=_HEARTBEAT_PT, payload=heartbeat.SerializeToString())
+                )
             raise RuntimeError(f"رسالة غير متوقعة أُرسلت للشبكة: {type(message).__name__}")
 
     # تعطيل load_dotenv أثناء إعادة التحميل حتى لا تتسرب قيم .env المحلية للاختبار
@@ -344,10 +440,10 @@ def _make_relative_trendbars(count: int, period_minutes: int) -> list:
         bars.append(
             types.SimpleNamespace(
                 utcTimestampInMinutes=int(start.timestamp() // 60) + i * period_minutes,
-                low=2650_00 + i * 10,  # 2650.00 + 0.10 لكل شمعة (وحدة 1/100000)
+                low=2650 * 100_000 + i * 10_000,  # 2650.00 + 0.10 لكل شمعة (الوحدة 1/100000 كما في بروتوكول cTrader الرسمي)
                 deltaOpen=0,
-                deltaClose=10,
-                deltaHigh=20,
+                deltaClose=10_000,  # +0.10 فوق low
+                deltaHigh=20_000,   # +0.20 فوق low
                 volume=100 + i,
             )
         )
@@ -380,7 +476,7 @@ def test_candles_sorted_oldest_to_newest_and_prices_decoded(fake_feed_factory):
     timestamps = df["timestamp"].tolist()
     assert timestamps == sorted(timestamps)
 
-    # low = 2650.00 + i*0.10 ، close = low + deltaClose(=10 → 0.10) ، high = low + deltaHigh(=20 → 0.20)
+    # low = 2650.00 + i*0.10 ، close = low + deltaClose(=10_000 → 0.10) ، high = low + deltaHigh(=20_000 → 0.20)
     first, last = df.iloc[0], df.iloc[-1]
     assert first["low"] == pytest.approx(2650.00)
     assert first["open"] == pytest.approx(2650.00)
@@ -458,3 +554,68 @@ def test_missing_credentials_fail_fast(fake_feed_factory, monkeypatch):
     with pytest.raises(Exception) as excinfo:
         feed_module.CTraderPriceFeed()
     assert "CTRADER_ACCESS_TOKEN" in str(excinfo.value)
+
+
+# --- اختبارات فكّ المغلّف الخام (نقطة الفشل التي كشفها الاتصال الحقيقي فقط) ---
+# ملاحظة: الـ FakeClient في الـ fixture يغلّف كل استجاباتها فعلياً كما يفعل الخادم+المكتبة
+# الحقيقيان، فكل الاختبارات أعلاه تمر حقيقةً عبر _unwrap_response. الاختبارات الثلاثة
+# أدناه تفحص مسار الفكّ نفسه صراحةً على مستوى الرسالة الواحدة.
+
+
+def _make_envelope(message, envelope_cls):
+    """يبني مغلف ProtoMessage حقيقياً: payloadType صحيح + payload مُسلسل فعلياً."""
+    envelope = envelope_cls()
+    envelope.payloadType = message.payloadType
+    envelope.payload = message.SerializeToString()
+    return envelope
+
+
+def test_expect_unwraps_raw_envelope_and_returns_decoded_message(fake_feed_factory):
+    """المسار الحقيقي: send() يعيد مغلف ProtoMessage(payloadType، payload=بايتات مُسلسلة)
+    و _expect يجب أن يفكّه ويعيد الرسالة المفكوكة بنوعها وحقولها الصحيحة."""
+    feed_module = _reload_settings_and_feed()
+    Envelope = feed_module.ProtoMessage  # المغلّف الخام
+
+    # رسالة بحقول فعلية (قائمة رموز كما يعيدها السيرفر)
+    symbols_res = feed_module.ProtoOASymbolsListRes()
+    symbols_res.symbol.append(types.SimpleNamespace(symbolId=845, symbolName="XAUUSD"))
+
+    envelope = _make_envelope(symbols_res, Envelope)
+    # إثبات الشكل: مغلّف خام وليس الرسالة نفسها
+    assert isinstance(envelope, Envelope)
+    assert envelope.payloadType == symbols_res.payloadType
+    assert isinstance(envelope.payload, (bytes, bytearray)) and len(envelope.payload) > 0
+
+    decoded = feed_module._Session._expect(envelope, feed_module.ProtoOASymbolsListRes, "جلب قائمة الرموز")
+    # الفكّ ناجح: النوع المتوقع، والحقول المُسلسلة سليمة بعد الفكّ
+    assert isinstance(decoded, feed_module.ProtoOASymbolsListRes)
+    assert decoded.symbol[0].symbolId == 845
+    assert decoded.symbol[0].symbolName == "XAUUSD"
+
+
+def test_expect_unwraps_error_envelope_into_loud_failure(fake_feed_factory):
+    """مغلّف خطأ من الخادم (ProtoOAErrorRes داخل ProtoMessage) → فشل بصوت عالٍ، لا صمت."""
+    feed_module = _reload_settings_and_feed()
+
+    error_res = feed_module.ProtoOAErrorRes()
+    error_res.errorCode = "CH_ACCESS_TOKEN_INVALID"
+    error_res.description = "token expired"
+
+    envelope = _make_envelope(error_res, feed_module.ProtoMessage)
+    with pytest.raises(Exception) as excinfo:
+        feed_module._Session._expect(envelope, feed_module.ProtoOAAccountAuthRes, "مصادقة الحساب")
+    assert "CH_ACCESS_TOKEN_INVALID" in str(excinfo.value)
+
+
+def test_expect_rejects_unrelated_envelope_loudly(fake_feed_factory):
+    """مغلّف برسالة غير متعلقة (مثل ProtoHeartbeatEvent صادراً في وقت غير متوقع)
+    أثناء انتظار استجابة محددة → رفض صريح يذكر payloadType، لا صمت ولا تخطٍّ أعمى."""
+    feed_module = _reload_settings_and_feed()
+
+    envelope = feed_module.ProtoMessage()
+    envelope.payloadType = 51  # ProtoHeartbeatEvent (قيمة بروتوكولية حقيقية)
+    envelope.payload = b""
+
+    with pytest.raises(Exception) as excinfo:
+        feed_module._Session._expect(envelope, feed_module.ProtoOAApplicationAuthRes, "مصادقة التطبيق")
+    assert "51" in str(excinfo.value)

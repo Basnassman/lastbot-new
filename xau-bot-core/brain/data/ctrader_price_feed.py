@@ -40,7 +40,7 @@ from config.settings import settings
 
 # المكتبة الرسمية من Spotware (OpenApiPy)
 from ctrader_open_api import Client, EndPoints, TcpProtocol
-from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import ProtoHeartbeatEvent
+from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import ProtoHeartbeatEvent, ProtoMessage
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAAccountAuthReq,
     ProtoOAAccountAuthRes,
@@ -88,6 +88,35 @@ _HEARTBEAT_SECONDS = 5.0
 # سياسة إعادة المحاولة للاتصال (تراجع أُسّي محدود بـ 10 ثوانٍ)
 def _retry_policy(attempts: int) -> float:
     return min(float(2 ** attempts), 10.0)
+
+
+# المكتبة الرسمية تعيد من client.send() مغلّف ProtoMessage الخام (payloadType + payload بايتات)
+# دون فكّه — نبني خريطة payloadType → صنف الرسالة من الرسائل نفسها (لا أرقام مكتوبة يدوياً).
+_PAYLOAD_TYPE_TO_CLASS: dict[int, type] = {}
+for _message_cls in (
+    ProtoOAApplicationAuthRes,
+    ProtoOAAccountAuthRes,
+    ProtoOASymbolsListRes,
+    ProtoOASymbolByIdRes,
+    ProtoOAGetTrendbarsRes,
+    ProtoOAErrorRes,
+):
+    try:
+        _PAYLOAD_TYPE_TO_CLASS[int(_message_cls().payloadType)] = _message_cls
+    except Exception:  # noqa: BLE001 — رسالة بلا payloadType بروتوكولي تُتجاهل (وضع الاختبار المزيف)
+        pass
+
+
+def _unwrap_response(response: object) -> object:
+    """يفكّ مغلّف ProtoMessage الخام إلى رسالة protobuf الداخلية الحقيقية (إن أمكن)."""
+    if not isinstance(response, ProtoMessage):
+        return response
+    message_cls = _PAYLOAD_TYPE_TO_CLASS.get(int(getattr(response, "payloadType", 0)))
+    if message_cls is None:
+        return response
+    message = message_cls()
+    message.ParseFromString(getattr(response, "payload", b""))
+    return message
 
 
 def _trendbars_to_dataframe(trendbars: Iterable[object], digits: int) -> pd.DataFrame:
@@ -233,10 +262,11 @@ class _Session:
         deferred.addErrback(lambda _failure: None)
 
     @staticmethod
-    def _expect(response: object, expected_type: type, step_name: str) -> None:
-        """يتحقق أن الاستجابة من النوع المتوقع، ويحوّل أخطاء الخادم إلى استثناء واضح."""
+    def _expect(response: object, expected_type: type, step_name: str) -> object:
+        """يفكّ المغلّف الخام، يتحقق من النوع المتوقع، ويعيد الرسالة المفكوكة للاستخدام."""
+        response = _unwrap_response(response)
         if isinstance(response, expected_type):
-            return
+            return response
         if isinstance(response, ProtoOAErrorRes):
             raise CTraderFeedError(
                 f"رفض cTrader طلب {step_name}: errorCode={response.errorCode} "
@@ -268,7 +298,7 @@ class _Session:
         request.toTimestamp = to_timestamp
 
         response = yield self.client.send(request, responseTimeoutInSeconds=self.request_timeout + 1)
-        self._expect(response, ProtoOAGetTrendbarsRes, "طلب الشموع")
+        response = self._expect(response, ProtoOAGetTrendbarsRes, "طلب الشموع")
         if not response.trendbar:
             raise CTraderFeedError(
                 f"لم يُعد cTrader أي شموع للرمز {symbol} على الإطار {timeframe} — "
@@ -286,7 +316,7 @@ class _Session:
         list_req = ProtoOASymbolsListReq()
         list_req.ctidTraderAccountId = self.account_id
         list_res = yield self.client.send(list_req, responseTimeoutInSeconds=self.request_timeout + 1)
-        self._expect(list_res, ProtoOASymbolsListRes, "جلب قائمة الرموز")
+        list_res = self._expect(list_res, ProtoOASymbolsListRes, "جلب قائمة الرموز")
 
         matches = [
             light_symbol
@@ -302,7 +332,7 @@ class _Session:
         by_id_req.ctidTraderAccountId = self.account_id
         by_id_req.symbolId.append(symbol_id)
         by_id_res = yield self.client.send(by_id_req, responseTimeoutInSeconds=self.request_timeout + 1)
-        self._expect(by_id_res, ProtoOASymbolByIdRes, "جلب تفاصيل الرمز")
+        by_id_res = self._expect(by_id_res, ProtoOASymbolByIdRes, "جلب تفاصيل الرمز")
         if not by_id_res.symbol:
             raise CTraderFeedError(f"فشل جلب تفاصيل الرمز {symbol}")
         self._symbol_digits[symbol_id] = int(by_id_res.symbol[0].digits)

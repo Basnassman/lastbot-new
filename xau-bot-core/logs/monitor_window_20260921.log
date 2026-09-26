@@ -1,0 +1,97 @@
+[2026-09-21T19:47:31+00:00] بدء حلقة المراقبة (log-only) — مصدر الأسعار: cTrader Demo الحقيقي
+[2026-09-21T19:47:32+00:00] السيرفر يعمل على 127.0.0.1:8123 — أول نداء بعد 60 ثانية من الإقلاع
+[2026-09-21T19:47:32+00:00] سطور السجل قبل الحلقة: 7
+[2026-09-21T19:47:37+00:00] نداء 1/14 @ 2026-09-21T19:47:32+00:00 → HTTP 200 | action=none | confidence=0.14 | size_usd=0.0 | سطور السجل بعد النداء: 8
+[2026-09-21T19:47:37+00:00] انتظار 15 دقيقة…
+[2026-09-21T20:02:38+00:00] نداء 2/14 @ 2026-09-21T20:02:37+00:00 → HTTP 200 | action=none | confidence=1.33 | size_usd=0.0 | سطور السجل بعد النداء: 9
+[2026-09-21T20:02:38+00:00] انتظار 15 دقيقة…
+[2026-09-21T20:17:39+00:00] نداء 3/14 @ 2026-09-21T20:17:38+00:00 → HTTP 200 | action=none | confidence=20.09 | size_usd=0.0 | سطور السجل بعد النداء: 10
+[2026-09-21T20:17:39+00:00] انتظار 15 دقيقة…
+[2026-09-21T20:32:41+00:00] نداء 4/14 @ 2026-09-21T20:32:39+00:00 → HTTP 200 | action=none | confidence=20.43 | size_usd=0.0 | سطور السجل بعد النداء: 11
+[2026-09-21T20:32:41+00:00] انتظار 15 دقيقة…
+[2026-09-21T20:47:41+00:00] نداء 5/14 @ 2026-09-21T20:47:41+00:00 → HTTP 200 | action=none | confidence=36.35 | size_usd=0.0 | سطور السجل بعد النداء: 12
+[2026-09-21T20:47:41+00:00] انتظار 15 دقيقة…
+[2026-09-21T21:02:42+00:00] نداء 6/14 @ 2026-09-21T21:02:41+00:00 → HTTP 200 | action=none | confidence=39.68 | size_usd=0.0 | سطور السجل بعد النداء: 13
+[2026-09-21T21:02:42+00:00] انتظار 15 دقيقة…
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/home/EBRAHIM/n/xau-bot-core/.venv/lib/python3.13/site-packages/uvicorn/protocols/http/httptools_impl.py", line 422, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        self.scope, self.receive, self.send
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/EBRAHIM/n/xau-bot-core/.venv/lib/python3.13/site-packages/uvicorn/middleware/proxy_headers.py", line 63, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/EBRAHIM/n/xau-bot-core/.venv/lib/python3.13/site-packages/fastapi/applications.py", line 1163, in __call__
+    await super().__call__(scope, receive, send)
+  File "/home/EBRAHIM/n/xau-bot-core/.venv/lib/python3.13/site-packages/starlette/applications.py", line 96, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/home/EBRAHIM/n/xau-bot-core/.venv/lib/python3.13/site-packages/starlette/middleware/errors.py", line 186, in __call__
+    raise exc
+  File "/home/EBRAHIM/n/xau-bot-core/.venv/lib/python3.13/site-packages/starlette/middleware/errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "/home/EBRAHIM/n/xau-bot-core/.venv/lib/python3.13/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/home/EBRAHIM/n/xau-bot-core/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/home/EBRAHIM/n/xau-bot-core/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/home/EBRAHIM/n/xau-bot-core/.venv/lib/python3.13/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/home/EBRAHIM/n/xau-bot-core/.venv/lib/python3.13/site-packages/starlette/routing.py", line 670, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/home/EBRAHIM/n/xau-bot-core/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 2734, in app
+    await route.handle(scope, receive, send)
+  File "/home/EBRAHIM/n/xau-bot-core/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 1281, in handle
+    await super().handle(scope, receive, send)
+  File "/home/EBRAHIM/n/xau-bot-core/.venv/lib/python3.13/site-packages/starlette/routing.py", line 280, in handle
+    await self.app(scope, receive, send)
+  File "/home/EBRAHIM/n/xau-bot-core/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 158, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "/home/EBRAHIM/n/xau-bot-core/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/home/EBRAHIM/n/xau-bot-core/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/home/EBRAHIM/n/xau-bot-core/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 144, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/home/EBRAHIM/n/xau-bot-core/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 706, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "/home/EBRAHIM/n/xau-bot-core/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 354, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/EBRAHIM/n/xau-bot-core/.venv/lib/python3.13/site-packages/starlette/concurrency.py", line 34, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/EBRAHIM/n/xau-bot-core/.venv/lib/python3.13/site-packages/anyio/to_thread.py", line 65, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        func, args, abandon_on_cancel=abandon_on_cancel, limiter=limiter
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/EBRAHIM/n/xau-bot-core/.venv/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 2706, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "/home/EBRAHIM/n/xau-bot-core/.venv/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 1100, in run
+    result = context.run(func, *args)
+  File "/home/EBRAHIM/n/xau-bot-core/brain/api/main.py", line 71, in decide_log_only
+    decision: FinalDecision = _engine.decide(symbol=symbol, timeframe=timeframe)
+                              ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/EBRAHIM/n/xau-bot-core/brain/decision_engine.py", line 41, in decide
+    candles = self.price_feed.get_candles(symbol, timeframe, count=100)
+  File "/home/EBRAHIM/n/xau-bot-core/brain/data/ctrader_price_feed.py", line 418, in get_candles
+    return self._run_sync(session.fetch_candles_on_reactor, symbol, timeframe, count)
+           ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/EBRAHIM/n/xau-bot-core/brain/data/ctrader_price_feed.py", line 522, in _run_sync
+    raise result
+brain.data.ctrader_price_feed.CTraderFeedError: فشل طلب cTrader: (11.0, 'Deferred')
+[2026-09-21T21:17:53+00:00] نداء 7/14 @ 2026-09-21T21:17:42+00:00 → فشل: Expecting value: line 1 column 1 (char 0)
+[2026-09-21T21:17:53+00:00] انتظار 15 دقيقة…
