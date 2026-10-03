@@ -428,6 +428,9 @@ class CTraderPriceFeed(PriceFeed):
     # --- إدارة الجلسة ---
 
     def _get_session(self) -> _Session:
+        """إعادة اتصال Twisted الشفافة (isConnected=True) قد لا تعني مصادقة حساب صالحة على المقبس الجديد؛
+        النظام يتعافى عبر مسار إبطال الجلسة العام عند CTraderFeedError التالي، بتكلفة نداء واحد فاشل.
+        لم يُصلَح عمداً حتى يظهر دليل أنه يؤثر على قرار فعلي."""
         with self._lock:
             if self._session is not None and self._session.client.isConnected:
                 return self._session
