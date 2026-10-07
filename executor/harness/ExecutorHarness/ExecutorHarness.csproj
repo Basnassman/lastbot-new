@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    يشمل ملف الـcBot الحقيقي نفسه (لا نسخة منه) عبر <Compile Include>، ثم يشغّله آلياً
+    ضد شيم cAlgo.API. الهدف: التحقق من أن كود الـcBot يَبنِي فعلاً وأن منطقه (فحص الحماية،
+    نداء HTTP، التسجيل، معالجة الأخطاء) يعمل عند تشغيله — خارج cTrader، على Linux.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>ExecutorHarness</RootNamespace>
+    <AssemblyName>ExecutorHarness</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="../../XauBotExecutor/XauBotExecutor.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../CAlgoApiShim/CAlgoApiShim.csproj" />
+  </ItemGroup>
+
+</Project>

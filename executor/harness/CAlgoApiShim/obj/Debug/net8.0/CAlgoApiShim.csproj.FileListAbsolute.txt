@@ -1,0 +1,12 @@
+/home/ebrahim/p/newbotgood/executor/harness/CAlgoApiShim/bin/Debug/net8.0/cAlgo.API.deps.json
+/home/ebrahim/p/newbotgood/executor/harness/CAlgoApiShim/bin/Debug/net8.0/cAlgo.API.dll
+/home/ebrahim/p/newbotgood/executor/harness/CAlgoApiShim/bin/Debug/net8.0/cAlgo.API.pdb
+/home/ebrahim/p/newbotgood/executor/harness/CAlgoApiShim/obj/Debug/net8.0/CAlgoApiShim.GeneratedMSBuildEditorConfig.editorconfig
+/home/ebrahim/p/newbotgood/executor/harness/CAlgoApiShim/obj/Debug/net8.0/CAlgoApiShim.AssemblyInfoInputs.cache
+/home/ebrahim/p/newbotgood/executor/harness/CAlgoApiShim/obj/Debug/net8.0/CAlgoApiShim.AssemblyInfo.cs
+/home/ebrahim/p/newbotgood/executor/harness/CAlgoApiShim/obj/Debug/net8.0/CAlgoApiShim.csproj.CoreCompileInputs.cache
+/home/ebrahim/p/newbotgood/executor/harness/CAlgoApiShim/obj/Debug/net8.0/CAlgoApiShim.sourcelink.json
+/home/ebrahim/p/newbotgood/executor/harness/CAlgoApiShim/obj/Debug/net8.0/cAlgo.API.dll
+/home/ebrahim/p/newbotgood/executor/harness/CAlgoApiShim/obj/Debug/net8.0/refint/cAlgo.API.dll
+/home/ebrahim/p/newbotgood/executor/harness/CAlgoApiShim/obj/Debug/net8.0/cAlgo.API.pdb
+/home/ebrahim/p/newbotgood/executor/harness/CAlgoApiShim/obj/Debug/net8.0/ref/cAlgo.API.dll

@@ -1,0 +1,41 @@
+نتائج سيناريوهات ExecutorHarness
+=================================
+PASS  A: حساب Demo لم يُوقف الـcBot
+PASS  A: سجل رسالة اجتياز فحص الحماية
+PASS  A: الـcBot يعمل بعد الفحص
+PASS  A: عدد نداءات HTTP = 3 (المتوقع 3)
+PASS  A: كل النداءات على /decide-log-only
+PASS  A: النداءات تحمل symbol و timeframe=M15
+PASS  A: سُجِّل 3 قرارات ناجحة
+PASS  A: السجل يحتوي action و confidence
+PASS  A: السجل يحتوي reasons
+PASS  A: السجل يحتوي dollar_trend_debug
+PASS  B: تم إيقاف الـcBot على الحساب الحقيقي (Stop)
+PASS  B: سجل رفض التشغيل بسبب IsLive=true
+PASS  B: لم يُنفَّذ أي نداء HTTP على حساب حقيقي
+PASS  B: لا نداء HTTP حتى بعد إغلاق شمعة (الـcBot موقوف)
+PASS  B: لم يُسجَّل أي قرار
+PASS  C: الـcBot لم يُسقَط بعد فشل الشبكة
+PASS  C: سُجِّل خطأ HTTP بوضوح
+PASS  C: نجحت إعادة المحاولة عند الشمعة التالية
+PASS  C: يوجد سطر تحذير واحد على الأقل
+PASS  D: الـcBot يعمل رغم HTTP 500
+PASS  D: سُجِّل رمز الحالة 500
+PASS  E: الـcBot يعمل رغم JSON غير صالح
+PASS  E: سُجِّل فشل تحليل JSON
+PASS  F: الـcBot نجا من استثناء Http.Get
+PASS  F: سُجِّل فشل الشبكة
+PASS  G: أُوقف الـcBot عند رمز غير موجود
+PASS  G: سُجِّلت رسالة الرمز غير الموجود
+PASS  G: لا نداء HTTP برمز غير صالح
+
+المجموع: نجح 28 | فشل 0
+
+الملخص:
+  - A demo-ok: calls=3, decisions=3
+  - B live-guard: stopped=True, httpCalls=0
+  - C network-recover: httpCalls=2, failures=1
+  - D http-500: survived & logged
+  - E bad-json: survived & logged
+  - F http-throw: survived & logged
+  - G symbol-missing: stopped & logged

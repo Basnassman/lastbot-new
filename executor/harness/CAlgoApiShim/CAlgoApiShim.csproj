@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    اسم التجميعة مطابق للاسم الحقيقي (cAlgo.API) كي تُحاكي بيئة cTrader عند التجميع.
+    هذه ليست مكتبة cTrader الرسمية — إنها شيم (stub) مبني من التوثيق الرسمي،
+    يُستَخدم فقط في بيئة التطوير (هنا، على Linux بدون cTrader) للتحقق من أن كود
+    الـcBot يَبنِي ويُنفّذ منطقه بشكل صحيح. النسخة النهائية تُبنى دائماً داخل cTrader.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>cAlgo.API</AssemblyName>
+    <RootNamespace>cAlgo.API</RootNamespace>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+</Project>
