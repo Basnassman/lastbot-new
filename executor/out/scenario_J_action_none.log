@@ -1,0 +1,18 @@
+2026-10-07 22:03:42.958 UTC | [XAU-BOT] =================================================================
+2026-10-07 22:03:42.958 UTC | [XAU-BOT] بدء تشغيل XauBotExecutor.
+2026-10-07 22:03:42.958 UTC | [XAU-BOT] RunningMode=RealTime | IsBacktesting=False
+2026-10-07 22:03:42.958 UTC | [XAU-BOT] الحساب: النوع=Hedged | الرقم=12345678 | الوسيط=HarnessBroker | IsLive=False
+2026-10-07 22:03:42.958 UTC | [XAU-BOT] ExecutionEnabled=true — التنفيذ الفعلي مُفعَّل.
+2026-10-07 22:03:42.958 UTC | [XAU-BOT] ✅ فحص الحماية: الحساب Demo (IsLive=false) — تم اجتيازه. متابعة التشغيل.
+2026-10-07 22:03:42.958 UTC | [XAU-BOT] تم الاشتراك في إغلاق شمعة M15 للرمز: XAUUSD
+2026-10-07 22:03:42.958 UTC | [XAU-BOT] Endpoint: http://127.0.0.1:8000/decide-log-only?symbol=<symbol>&timeframe=M15
+2026-10-07 22:03:42.958 UTC | [XAU-BOT] جاهز. سيُستدعى Brain API عند كل إغلاق شمعة M15.
+2026-10-07 22:03:42.958 UTC | [XAU-BOT] =================================================================
+2026-10-07 22:03:42.958 UTC | [XAU-BOT] ────────────────────────────────────────────────────────────────
+2026-10-07 22:03:42.958 UTC | [XAU-BOT] 🔔 إغلاق شمعة M15 على XAUUSD @ 2026-01-01 09:45:00 UTC
+2026-10-07 22:03:42.958 UTC | [XAU-BOT]    GET http://127.0.0.1:8000/decide-log-only?symbol=XAUUSD&timeframe=M15
+2026-10-07 22:03:42.958 UTC | [XAU-BOT] ✅ قرار مُستلَم (نجاح #1) | mode=log-only | action=none | confidence=90 | position_size_usd=0
+2026-10-07 22:03:42.958 UTC | [XAU-BOT]    reasons (1):
+2026-10-07 22:03:42.958 UTC | [XAU-BOT]      - harness
+2026-10-07 22:03:42.958 UTC | [XAU-BOT]    dollar_trend_debug: null
+2026-10-07 22:03:42.958 UTC | [XAU-BOT] [تنفيذ] لا أمر: action='none' ليس buy/sell.

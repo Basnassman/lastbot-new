@@ -1,14 +1,15 @@
-2026-10-07 12:58:26.601 UTC | [XAU-BOT] =================================================================
-2026-10-07 12:58:26.601 UTC | [XAU-BOT] بدء تشغيل XauBotExecutor — وضع مراقبة فقط (لا تنفيذ صفقات في هذه الدفعة).
-2026-10-07 12:58:26.601 UTC | [XAU-BOT] RunningMode=RealTime | IsBacktesting=False
-2026-10-07 12:58:26.601 UTC | [XAU-BOT] الحساب: النوع=Hedged | الرقم=12345678 | الوسيط=HarnessBroker | IsLive=False
-2026-10-07 12:58:26.601 UTC | [XAU-BOT] ✅ فحص الحماية: الحساب Demo (IsLive=false) — تم اجتيازه. متابعة التشغيل.
-2026-10-07 12:58:26.601 UTC | [XAU-BOT] تم الاشتراك في إغلاق شمعة M15 للرمز: XAUUSD
-2026-10-07 12:58:26.601 UTC | [XAU-BOT] Endpoint: http://127.0.0.1:8000/decide-log-only?symbol=<symbol>&timeframe=M15
-2026-10-07 12:58:26.601 UTC | [XAU-BOT] جاهز. سيُستدعى Brain API عند كل إغلاق شمعة M15.
-2026-10-07 12:58:26.601 UTC | [XAU-BOT] =================================================================
-2026-10-07 12:58:26.601 UTC | [XAU-BOT] ────────────────────────────────────────────────────────────────
-2026-10-07 12:58:26.601 UTC | [XAU-BOT] 🔔 إغلاق شمعة M15 على XAUUSD @ 2026-10-07 12:58:26 UTC
-2026-10-07 12:58:26.601 UTC | [XAU-BOT]    GET http://127.0.0.1:8000/decide-log-only?symbol=XAUUSD&timeframe=M15
-2026-10-07 12:58:26.603 UTC | [XAU-BOT] ⚠️ تعذّر تحليل JSON القادم من Brain API: 't' is an invalid start of a property name. Expected a '"'. Path: $ | LineNumber: 0 | BytePositionInLine: 2.
-2026-10-07 12:58:26.604 UTC | [XAU-BOT]    نص الاستجابة الخام: { this is not valid json 
+2026-10-07 22:03:42.938 UTC | [XAU-BOT] =================================================================
+2026-10-07 22:03:42.938 UTC | [XAU-BOT] بدء تشغيل XauBotExecutor.
+2026-10-07 22:03:42.938 UTC | [XAU-BOT] RunningMode=RealTime | IsBacktesting=False
+2026-10-07 22:03:42.938 UTC | [XAU-BOT] الحساب: النوع=Hedged | الرقم=12345678 | الوسيط=HarnessBroker | IsLive=False
+2026-10-07 22:03:42.938 UTC | [XAU-BOT] ExecutionEnabled=false — وضع مراقبة فقط.
+2026-10-07 22:03:42.938 UTC | [XAU-BOT] ✅ فحص الحماية: الحساب Demo (IsLive=false) — تم اجتيازه. متابعة التشغيل.
+2026-10-07 22:03:42.938 UTC | [XAU-BOT] تم الاشتراك في إغلاق شمعة M15 للرمز: XAUUSD
+2026-10-07 22:03:42.938 UTC | [XAU-BOT] Endpoint: http://127.0.0.1:8000/decide-log-only?symbol=<symbol>&timeframe=M15
+2026-10-07 22:03:42.938 UTC | [XAU-BOT] جاهز. سيُستدعى Brain API عند كل إغلاق شمعة M15.
+2026-10-07 22:03:42.938 UTC | [XAU-BOT] =================================================================
+2026-10-07 22:03:42.938 UTC | [XAU-BOT] ────────────────────────────────────────────────────────────────
+2026-10-07 22:03:42.938 UTC | [XAU-BOT] 🔔 إغلاق شمعة M15 على XAUUSD @ 2026-10-07 22:03:42 UTC
+2026-10-07 22:03:42.938 UTC | [XAU-BOT]    GET http://127.0.0.1:8000/decide-log-only?symbol=XAUUSD&timeframe=M15
+2026-10-07 22:03:42.941 UTC | [XAU-BOT] ⚠️ تعذّر تحليل JSON القادم من Brain API: 't' is an invalid start of a property name. Expected a '"'. Path: $ | LineNumber: 0 | BytePositionInLine: 2.
+2026-10-07 22:03:42.941 UTC | [XAU-BOT]    نص الاستجابة الخام: { this is not valid json 

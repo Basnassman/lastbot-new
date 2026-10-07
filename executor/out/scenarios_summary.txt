@@ -10,6 +10,7 @@ PASS  A: سُجِّل 3 قرارات ناجحة
 PASS  A: السجل يحتوي action و confidence
 PASS  A: السجل يحتوي reasons
 PASS  A: السجل يحتوي dollar_trend_debug
+PASS  A: سُجِّل أن مفتاح التنفيذ مطفأ (وضع مراقبة)
 PASS  B: تم إيقاف الـcBot على الحساب الحقيقي (Stop)
 PASS  B: سجل رفض التشغيل بسبب IsLive=true
 PASS  B: لم يُنفَّذ أي نداء HTTP على حساب حقيقي
@@ -28,8 +29,46 @@ PASS  F: سُجِّل فشل الشبكة
 PASS  G: أُوقف الـcBot عند رمز غير موجود
 PASS  G: سُجِّلت رسالة الرمز غير الموجود
 PASS  G: لا نداء HTTP برمز غير صالح
+PASS  H: أُرسل أمر واحد فقط (الفعل=1)
+PASS  H: نوع الأمر Buy
+PASS  H: الوسم = XauBotExecutor
+PASS  H: SL = 15 pip (الفعلي=15)
+PASS  H: TP = SL×1.5 = 22.5 pip (الفعلي=22.5)
+PASS  H: SL و TP مرفقان في نفس الأمر (لا أمر منفصل)
+PASS  H: الحجم = 10 وحدة (الفعلي=10)
+PASS  H: سُجِّل فتح المركز مع التفاصيل
+PASS  H: سُجِّل SL/TP الفعليان على الخادم
+PASS  H: صار في الحساب مركز مفتوح واحد
+PASS  H2: أُرسل أمر Sell واحد مع SL/TP
+PASS  H2: SL/TP مرفقان في أمر البيع
+PASS  I: لا أمر عند ExecutionEnabled=false
+PASS  I: سُجِّل وضع المراقبة عند البدء
+PASS  I: سُجِّل سبب الرفض عند محاولة التنفيذ
+PASS  J: لا أمر عند action=none
+PASS  J: سُجِّل أن القرار ليس buy/sell
+PASS  K: لا أمر عند تجاوز سقف حجم المركز
+PASS  K: سُجِّل سبب تجاوز السقف
+PASS  L: لا أمر عند position_size_usd <= 0
+PASS  L: سُجِّل سبب الحجم غير الصالح
+PASS  M: لا أمر عند وجود مركز مفتوح مسبقاً
+PASS  M: سُجِّل سبب وجود مركز قائم
+PASS  N: لا أمر عند تعذّر حساب ATR
+PASS  N: سُجِّل سبب تعذّر ATR (لا SL ⇒ لا صفقة)
+PASS  O: حُوِّل أمر واحد للخادم
+PASS  O: سُجِّل فشل التنفيذ من المنصة
+PASS  O: سُجِّل نص/رمز الخطأ من المنصة
+PASS  O: لم يُفتح أي مركز بعد الفشل
+PASS  O: لم تُعَد المحاولة تلقائياً بنفس الشمعة
+PASS  P: لا أمر عندما يكون الحجم أقل من الحد الأدنى
+PASS  P: سُجِّل سبب الحجم تحت الحد الأدنى
+PASS  Q: أمر واحد فقط لنفس الشمعة (الفعلي=1)
+PASS  Q: سُجِّل منع التكرار لنفس الشمعة
+PASS  R: فُتح مركز واحد قبل الإغلاق
+PASS  R: أُرسل نداء POST واحد للإغلاق (الفعلي=1)
+PASS  R: النداء POST /trade-result?pnl_usd=12.5 (الفعلي=POST http://127.0.0.1:8000/trade-result?pnl_usd=12.5)
+PASS  R: سُجِّل إرسال الـPnL إلى Brain
 
-المجموع: نجح 28 | فشل 0
+المجموع: نجح 67 | فشل 0
 
 الملخص:
   - A demo-ok: calls=3, decisions=3
@@ -39,3 +78,15 @@ PASS  G: لا نداء HTTP برمز غير صالح
   - E bad-json: survived & logged
   - F http-throw: survived & logged
   - G symbol-missing: stopped & logged
+  - H exec-success-buy: orders=1, volume=10
+  - H2 exec-success-sell: orders=1
+  - I exec-disabled: no order
+  - J action-none: no order
+  - K over-max-size: no order
+  - L invalid-size: no order
+  - M existing-position: no order
+  - N no-atr: no order
+  - O server-failure: orders=1
+  - P volume-below-min: no order
+  - Q idempotency: orders=1
+  - R position-closed-report: sends=1

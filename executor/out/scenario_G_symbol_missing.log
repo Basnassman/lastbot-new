@@ -1,7 +1,8 @@
-2026-10-07 12:58:26.604 UTC | [XAU-BOT] =================================================================
-2026-10-07 12:58:26.604 UTC | [XAU-BOT] بدء تشغيل XauBotExecutor — وضع مراقبة فقط (لا تنفيذ صفقات في هذه الدفعة).
-2026-10-07 12:58:26.604 UTC | [XAU-BOT] RunningMode=RealTime | IsBacktesting=False
-2026-10-07 12:58:26.604 UTC | [XAU-BOT] الحساب: النوع=Hedged | الرقم=12345678 | الوسيط=HarnessBroker | IsLive=False
-2026-10-07 12:58:26.604 UTC | [XAU-BOT] ✅ فحص الحماية: الحساب Demo (IsLive=false) — تم اجتيازه. متابعة التشغيل.
-2026-10-07 12:58:26.604 UTC | [XAU-BOT] ❌ تعذّر إيجاد الرمز 'XAUUSD' عند هذا الوسيط: Symbol 'XAUUSD' not found
-2026-10-07 12:58:26.604 UTC | [XAU-BOT] ❌ يتم إيقاف الـcBot. تحقّق من إعداد Parameter «Symbol».
+2026-10-07 22:03:42.942 UTC | [XAU-BOT] =================================================================
+2026-10-07 22:03:42.942 UTC | [XAU-BOT] بدء تشغيل XauBotExecutor.
+2026-10-07 22:03:42.942 UTC | [XAU-BOT] RunningMode=RealTime | IsBacktesting=False
+2026-10-07 22:03:42.942 UTC | [XAU-BOT] الحساب: النوع=Hedged | الرقم=12345678 | الوسيط=HarnessBroker | IsLive=False
+2026-10-07 22:03:42.942 UTC | [XAU-BOT] ExecutionEnabled=false — وضع مراقبة فقط.
+2026-10-07 22:03:42.942 UTC | [XAU-BOT] ✅ فحص الحماية: الحساب Demo (IsLive=false) — تم اجتيازه. متابعة التشغيل.
+2026-10-07 22:03:42.942 UTC | [XAU-BOT] ❌ تعذّر إيجاد الرمز 'XAUUSD' عند هذا الوسيط: Symbol 'XAUUSD' not found
+2026-10-07 22:03:42.942 UTC | [XAU-BOT] ❌ يتم إيقاف الـcBot. تحقّق من إعداد Parameter «Symbol».
