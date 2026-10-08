@@ -498,13 +498,19 @@ namespace cAlgo.Robots
             }
 
             var step = symbol.VolumeInUnitsStep;
-            if (double.IsNaN(step) || step <= 0)
+            var minVolume = symbol.VolumeInUnitsMin;
+            var maxVolume = symbol.VolumeInUnitsMax;
+
+            if (double.IsNaN(step) || step <= 0 ||
+                double.IsNaN(minVolume) || minVolume <= 0 ||
+                double.IsNaN(maxVolume) || maxVolume < minVolume)
             {
-                Print($"{LogPrefix} [تنفيذ] مرفوض: VolumeInUnitsStep غير صالح ({Fmt(step)}).");
+                Print($"{LogPrefix} [تنفيذ] مرفوض: مواصفات حجم الرمز غير صالحة. " +
+                      $"Min={Fmt(minVolume)} Step={Fmt(step)} Max={Fmt(maxVolume)}.");
                 return;
             }
 
-            // الحجم الخام = المخاطرة$ / (مسافة SL بالنقاط × قيمة النقطة لكل وحدة).
+            // الحجم الخام = المخاطرة بالدولار / (مسافة SL بالنقاط × قيمة النقطة لكل وحدة).
             var rawVolume = sizeUsd / (slPips * pipValuePerUnit);
             if (double.IsNaN(rawVolume) || double.IsInfinity(rawVolume) || rawVolume <= 0)
             {
@@ -512,27 +518,54 @@ namespace cAlgo.Robots
                 return;
             }
 
-            // التقريب للأسفل لأقرب خطوة لوت — لا نتجاوز المخاطرة المقصودة أبداً.
+            // سجّل خصائص الرمز لتشخيص اختلاف الوحدات لدى الوسيط.
+            var minRiskUsd = minVolume * slPips * pipValuePerUnit;
+            Print($"{LogPrefix} [حجم] الرمز={symbol.Name} | PipSize={Fmt(symbol.PipSize)} | " +
+                  $"PipValue={Fmt(pipValuePerUnit)} | SL={Fmt(slPips)} pips | " +
+                  $"RawVolume={Fmt(rawVolume)} | Min={Fmt(minVolume)} | Step={Fmt(step)} | " +
+                  $"Max={Fmt(maxVolume)} | المخاطرة المقدرة عند الحد الأدنى≈${Fmt(minRiskUsd)}.");
+
+            // إذا كان الحد الأدنى يتجاوز ميزانية المخاطرة، لا نفتح الصفقة ولا نرفع الحجم تلقائياً.
+            if (rawVolume < minVolume)
+            {
+                Print($"{LogPrefix} [تنفيذ] مرفوض بأمان: الحجم الخام ({Fmt(rawVolume)}) أقل من الحد الأدنى " +
+                      $"({Fmt(minVolume)}). المخاطرة المقدرة عند الحد الأدنى=${Fmt(minRiskUsd)} " +
+                      $"مقابل ميزانية=${Fmt(sizeUsd)}. تحقّق من وحدات الحجم وقيمة PipValue لدى الوسيط.");
+                return;
+            }
+
+            // التقريب للأسفل إلى خطوة الحجم حتى لا يتجاوز الحجم المخاطرة المحسوبة.
             var volume = Math.Floor((rawVolume / step) + 1e-9) * step;
 
-            if (rawVolume < symbol.VolumeInUnitsMin)
+            if (volume < minVolume)
             {
-                Print($"{LogPrefix} [تنفيذ] مرفوض: الحجم المحسوب ({Fmt(rawVolume)}) أقل من الحد الأدنى " +
-                      $"للوسيط ({Fmt(symbol.VolumeInUnitsMin)}) — لا تقريب للأعلى يتجاوز المخاطرة المقصودة.");
+                Print($"{LogPrefix} [تنفيذ] مرفوض بأمان: الحجم بعد التقريب ({Fmt(volume)}) أقل من الحد الأدنى " +
+                      $"({Fmt(minVolume)}).");
                 return;
             }
-            if (volume < symbol.VolumeInUnitsMin)
-            {
-                Print($"{LogPrefix} [تنفيذ] مرفوض: الحجم بعد التقريب ({Fmt(volume)}) أقل من الحد الأدنى " +
-                      $"({Fmt(symbol.VolumeInUnitsMin)}).");
-                return;
-            }
-            if (volume > symbol.VolumeInUnitsMax)
+            if (volume > maxVolume)
             {
                 Print($"{LogPrefix} [تنفيذ] مرفوض: الحجم ({Fmt(volume)}) يتجاوز الحد الأقصى " +
-                      $"({Fmt(symbol.VolumeInUnitsMax)}).");
+                      $"({Fmt(maxVolume)}).");
                 return;
             }
+
+            // لا ترسل الحجم إلا بعد تطبيعه والتحقق من أنه لا يتجاوز ميزانية المخاطرة.
+            var normalizedVolume = symbol.NormalizeVolumeInUnits(volume, RoundingMode.Down);
+            if (normalizedVolume < minVolume || normalizedVolume > maxVolume)
+            {
+                Print($"{LogPrefix} [تنفيذ] مرفوض: الحجم المطبع ({Fmt(normalizedVolume)}) خارج حدود الرمز.");
+                return;
+            }
+
+            var normalizedRiskUsd = normalizedVolume * slPips * pipValuePerUnit;
+            if (normalizedRiskUsd > sizeUsd + 1e-8)
+            {
+                Print($"{LogPrefix} [تنفيذ] مرفوض بأمان: المخاطرة المقدرة بعد التطبيع " +
+                      $"(${Fmt(normalizedRiskUsd)}) تتجاوز الميزانية (${Fmt(sizeUsd)}).");
+                return;
+            }
+            volume = normalizedVolume;
 
             // --- الطبقة 5: إرسال أمر سوقي مع SL/TP في نفس الاستدعاء ----------------
             var tradeType = isBuy ? TradeType.Buy : TradeType.Sell;
@@ -681,7 +714,7 @@ namespace cAlgo.Robots
                 // POST عبر واجهة cTrader الموثّقة: HttpRequest + Http.Send (لا يوجد Http.Post مباشر).
                 var request = new HttpRequest(new Uri(url))
                 {
-                    Method = HttpMethod.Post,
+                    Method = cAlgo.API.HttpMethod.Post,
                     Body = string.Empty,
                 };
                 var response = Http.Send(request);
