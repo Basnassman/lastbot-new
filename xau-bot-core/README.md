@@ -22,6 +22,7 @@ xau-bot-core/
 │   ├── analysis/
 │   │   ├── indicators.py         # EMA, RSI, ATR — بدون مكتبات خارجية ثقيلة
 │   │   ├── environment_filter.py # المرحلة 1: هل السوق صالح للتداول الآن؟
+│   │   ├── market_structure.py   # إضافة المرحلة 1: مناطق دعم/مقاومة + سيولة محتملة
 │   │   └── regime_detector.py    # المرحلة 2: ترند أم تذبذب؟
 │   ├── scoring/
 │   │   └── weighted_voting.py    # المرحلة 3: نظام التصويت المرجّح المبسّط
@@ -62,6 +63,14 @@ uvicorn brain.api.main:app --reload --port 8000
 - ✅ نظام مخاطر: حجم مخاطرة ديناميكي حسب الثقة + قاطع دائرة يومي
 - ✅ تسجيل كل قرار مع الأسباب الكاملة (`logs/decisions.jsonl`)
 - ✅ واجهة FastAPI جاهزة ليستدعيها cBot عبر HTTP
+- ✅ تحليل البنية السوقية (إضافة المرحلة 1): مناطق دعم/مقاومة مؤكدة من نقاط انعطاف
+     سابقة (بلا نظر إلى المستقبل)، ومناطق سيولة محتملة — تُرفَق بكل قرار في حقل
+     `market_structure`. إضافة صرفة: لا تغيّر القرار ولا حجم المخاطرة ولا ATR/SL/TP.
+     الإعدادات (كلها اختيارية بقيم افتراضية في `config/settings.py`):
+     `MARKET_STRUCTURE_ENABLED`, `MARKET_STRUCTURE_SWING_WINDOW`,
+     `MARKET_STRUCTURE_MERGE_TOLERANCE_ATR`, `MARKET_STRUCTURE_MIN_REACTIONS`,
+     `MARKET_STRUCTURE_MAX_ZONES`, `MARKET_STRUCTURE_RECENCY_BARS`,
+     `MARKET_STRUCTURE_MAX_LIQUIDITY_LEVELS`.
 
 ## ما هو غير موجود بعد (عمداً)
 

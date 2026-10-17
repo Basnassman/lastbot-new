@@ -84,6 +84,9 @@ def decide(symbol: str = "XAUUSD", timeframe: str = "M15") -> dict:
         "position_size_usd": decision.position_size_usd,
         "confidence": decision.confidence,
         "reasons": decision.reasons,
+        # سياق إضافي فقط (المرحلة 1): لا يغيّر أي حقل أعلاه ولا أي سلوك تنفيذي.
+        # None عند تعطيل الميزة؛ يبقى ظاهراً دائماً بمفتاح ثابت لتوافق المستدعين.
+        "market_structure": decision.market_structure,
     }
 
 
@@ -109,6 +112,9 @@ def decide_log_only(symbol: str = "XAUUSD", timeframe: str = "M15") -> dict:
         "confidence": decision.confidence,
         "reasons": decision.reasons,
         "dollar_trend_debug": dollar_debug,
+        # سياق إضافي فقط (المرحلة 1): الـcBot يتجاهل أي حقل لا يعرفه (System.Text.Json)،
+        # فإضافته هنا لا تكسر أي مستدعٍ قائم — ويُثبَت ذلك فعلياً عبر الـharness.
+        "market_structure": decision.market_structure,
     }
 
 
