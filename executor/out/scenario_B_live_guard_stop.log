@@ -1,7 +1,7 @@
-2026-10-21 22:38:06.779 UTC | [XAU-BOT] =================================================================
-2026-10-21 22:38:06.779 UTC | [XAU-BOT] بدء تشغيل XauBotExecutor.
-2026-10-21 22:38:06.779 UTC | [XAU-BOT] RunningMode=RealTime | IsBacktesting=False
-2026-10-21 22:38:06.779 UTC | [XAU-BOT] الحساب: النوع=Hedged | الرقم=12345678 | الوسيط=HarnessBroker | IsLive=True
-2026-10-21 22:38:06.779 UTC | [XAU-BOT] ExecutionEnabled=false — وضع مراقبة فقط.
-2026-10-21 22:38:06.779 UTC | [XAU-BOT] ❌ رفض التشغيل: الحساب الحالي حساب حقيقي (IsLive=true)، رقم الحساب=12345678، الوسيط=HarnessBroker.
-2026-10-21 22:38:06.779 UTC | [XAU-BOT] ❌ هذا الـcBot يعمل على حساب Demo فقط. يتم إيقافه الآن ولن ينفّذ أي شيء.
+2026-10-22 21:08:56.151 UTC | [XAU-BOT] =================================================================
+2026-10-22 21:08:56.151 UTC | [XAU-BOT] بدء تشغيل XauBotExecutor.
+2026-10-22 21:08:56.151 UTC | [XAU-BOT] RunningMode=RealTime | IsBacktesting=False
+2026-10-22 21:08:56.151 UTC | [XAU-BOT] الحساب: النوع=Hedged | الرقم=12345678 | الوسيط=HarnessBroker | IsLive=True
+2026-10-22 21:08:56.151 UTC | [XAU-BOT] ExecutionEnabled=false — وضع مراقبة فقط.
+2026-10-22 21:08:56.151 UTC | [XAU-BOT] ❌ رفض التشغيل: الحساب الحالي حساب حقيقي (IsLive=true)، رقم الحساب=12345678، الوسيط=HarnessBroker.
+2026-10-22 21:08:56.151 UTC | [XAU-BOT] ❌ هذا الـcBot يعمل على حساب Demo فقط. يتم إيقافه الآن ولن ينفّذ أي شيء.

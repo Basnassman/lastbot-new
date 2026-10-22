@@ -31,8 +31,11 @@
 //      A = 20% و B = 50% و C = 100% من مسافة TP الأصلية. مجموع الأحجام = الإجمالي
 //      بالضبط بعد تطبيع خطوة الحجم، وبلا تقريب أو حذف أو تجاوز.
 //   ج) بعد تأكيد إغلاق Position A عند هدفه (حدث Positions.Closed + السبب=TakeProfit)
-//      يُنقل وقف B و C إلى التعادل الصافي بعد التكاليف (عمولات + سواب؛ الانتشار محتسب
-//      في سعر الدخول) مع الحفاظ على هدفيهما. لا يُرخّى أي وقف قائم أبداً.
+//      يُنقل وقف B و C إلى مستوى يحقق لكل منهما ربحاً صافياً = 1% من ربح Position C
+//      المتوقع عند هدفه الأصلي 100% (قيمة ديناميكية من بيانات C، لا مبلغ ثابت).
+//      التكاليف المعروفة (عمولة الاتجاه الواحد + تقدير عمولة الإغلاق + السواب) تُضاف
+//      إلى الهدف؛ الانتشار محتسب أصلاً في سعر الدخول فلا يُضاف مرتين. هدف B و C
+//      الأصلي (50%/100%) يُمرَّر كما هو، ولا يُرخّى أي وقف قائم أبداً.
 //   د) كل التعديلات مقيّدة بمعرّفات الخادم (Position.Id) والوسم، وليست بالتعليق.
 //      التكرار والمحاولات المرفوضة وإعادة التشغيل تُسجَّل ولا تُنتج أوامر مكرّرة.
 //
@@ -79,6 +82,11 @@ namespace cAlgo.Robots
         private const double TargetFractionA = 0.20;
         private const double TargetFractionB = 0.50;
         private const double TargetFractionC = 1.00;
+
+        // نسبة الربح الصافي المطلوبة لكل من B و C بعد إغلاق A عند هدفه (20%).
+        // الأساس هو ربح Position C المتوقع عند هدفه الأصلي 100% (Gross) — انظر
+        // TryComputeProtectionTargetNetProfit. الرقم نسبة وليس مبلغاً ثابتاً بالدولار.
+        private const double ProtectionNetProfitFractionOfC = 0.01;
 
         // ---------------------------------------------------------------------------
         // Parameters: كل ما هو قابل للتعديل يُعرَّف هنا. لا يوجد Host/Port مكتوب يدوياً
@@ -1084,7 +1092,8 @@ namespace cAlgo.Robots
                 if (AreChildrenAlreadyAtBreakEven(group))
                 {
                     group.ProtectionDone = true;
-                    Print($"{LogPrefix} [استعادة] المراكز المتبقية لمجموعة {token} عند التعادل مسبقاً — لا تعديل.");
+                    Print($"{LogPrefix} [استعادة] المراكز المتبقية لمجموعة {token} تحت وقف حماية سابق " +
+                          $"(أفضل من الدخول) — لا تعديل.");
                 }
                 else
                 {
@@ -1211,21 +1220,39 @@ namespace cAlgo.Robots
                 return;
             }
 
+            // الهدف الصافي المشترك لـ B و C = 1% من ربح Position C المتوقع عند هدفه
+            // الأصلي 100%. يُحسب مرة واحدة من C (مرجع الصيغة)، ثم يُحوَّل لكل مركز
+            // إلى سعر وقف مستقل حسب حجمه ودخوله وتكاليفه. لا مبلغ ثابت بالدولار.
+            var anyChildOpen = FindOpenPositionById(group.IdB) != null || FindOpenPositionById(group.IdC) != null;
+            var targetNetUsd = 0.0;
+            if (anyChildOpen)
+            {
+                if (!TryComputeProtectionTargetNetProfit(group, out targetNetUsd, out var targetError))
+                {
+                    // لا بديل: لا تعادل ولا صيغة قديمة. الوقفان الأصليان يبقيان كما هما.
+                    Print($"{LogPrefix} [حماية] ❌ تعذّر حساب هدف الحماية الصافي: {targetError}. " +
+                          $"لم يُعدَّل أي وقف، والوقفان الأصليان لـ B/C يبقيان كما هما. " +
+                          $"لا يوجد بديل (لا تعادل ولا صيغة قديمة).");
+                    group.ProtectionFailed = true;
+                    return;
+                }
+            }
+
             var applied = 0;
             var alreadyProtected = 0;
             var notOpen = 0;
             var failed = 0;
 
-            var outcomeB = ProtectChild(group, RoleB, group.IdB);
+            var outcomeB = ProtectChild(group, RoleB, group.IdB, targetNetUsd);
             CountOutcome(outcomeB, ref applied, ref alreadyProtected, ref notOpen, ref failed);
 
-            var outcomeC = ProtectChild(group, RoleC, group.IdC);
+            var outcomeC = ProtectChild(group, RoleC, group.IdC, targetNetUsd);
             CountOutcome(outcomeC, ref applied, ref alreadyProtected, ref notOpen, ref failed);
 
             if (failed > 0)
             {
                 group.ProtectionFailed = true;
-                Print($"{LogPrefix} [حماية] ⚠️ لم تكتمل الحماية: طُبِّق {applied} | تعادل مسبق {alreadyProtected} | " +
+                Print($"{LogPrefix} [حماية] ⚠️ لم تكتمل الحماية: طُبِّق {applied} | حماية سابقة {alreadyProtected} | " +
                       $"غير مفتوح {notOpen} | فشل {failed}. وقف الخسارة الأصلي يبقى على ما فشل تعديله، " +
                       $"ولا تُعاد المحاولة تلقائياً. يلزم تحقق يدوي.");
             }
@@ -1239,7 +1266,7 @@ namespace cAlgo.Robots
             else
             {
                 group.ProtectionDone = true;
-                Print($"{LogPrefix} [حماية] ✅ انتهت معالجة الحماية: طُبِّق {applied} | تعادل مسبق {alreadyProtected} | " +
+                Print($"{LogPrefix} [حماية] ✅ انتهت معالجة الحماية: طُبِّق {applied} | حماية سابقة {alreadyProtected} | " +
                       $"غير مفتوح {notOpen}.");
             }
         }
@@ -1264,7 +1291,7 @@ namespace cAlgo.Robots
             }
         }
 
-        private ProtectionOutcome ProtectChild(TradeGroup group, string role, int positionId)
+        private ProtectionOutcome ProtectChild(TradeGroup group, string role, int positionId, double targetNetUsd)
         {
             if (positionId == 0)
             {
@@ -1298,9 +1325,12 @@ namespace cAlgo.Robots
                 return ProtectionOutcome.Failed;
             }
 
-            double breakEvenPrice;
+            double protectionPrice;
+            double requiredGrossUsd;
+            double costsUsd;
             string errorReason;
-            if (!TryComputeBreakEvenStop(position, out breakEvenPrice, out errorReason))
+            if (!TryComputeProtectionStop(position, targetNetUsd, out protectionPrice,
+                    out requiredGrossUsd, out costsUsd, out errorReason))
             {
                 Print($"{LogPrefix} [حماية] ❌ المركز {role} #{positionId}: {errorReason}");
                 return ProtectionOutcome.Failed;
@@ -1310,9 +1340,9 @@ namespace cAlgo.Robots
             var tick = _targetSymbol != null && _targetSymbol.TickSize > 0 ? _targetSymbol.TickSize : 0.0;
             var epsilon = tick > 0 ? tick / 2.0 : 1e-9;
 
-            if (existingStop.HasValue && Math.Abs(existingStop.Value - breakEvenPrice) <= epsilon)
+            if (existingStop.HasValue && Math.Abs(existingStop.Value - protectionPrice) <= epsilon)
             {
-                Print($"{LogPrefix} [حماية] المركز {role} #{positionId} عند التعادل مسبقاً " +
+                Print($"{LogPrefix} [حماية] المركز {role} #{positionId} عند وقف الحماية المحسوب مسبقاً " +
                       $"(SL={Fmt(existingStop.Value)}) — لا تعديل.");
                 return ProtectionOutcome.AlreadyProtected;
             }
@@ -1320,22 +1350,37 @@ namespace cAlgo.Robots
             if (existingStop.HasValue)
             {
                 var loosens = position.TradeType == TradeType.Buy
-                    ? breakEvenPrice < existingStop.Value - epsilon
-                    : breakEvenPrice > existingStop.Value + epsilon;
+                    ? protectionPrice < existingStop.Value - epsilon
+                    : protectionPrice > existingStop.Value + epsilon;
 
                 if (loosens)
                 {
-                    Print($"{LogPrefix} [حماية] المركز {role} #{positionId}: وقف التعادل ({Fmt(breakEvenPrice)}) " +
-                          $"أسوأ من الوقف الحالي ({Fmt(existingStop.Value)}) — لن يُرخّى الوقف. لا تعديل.");
+                    Print($"{LogPrefix} [حماية] المركز {role} #{positionId}: وقف الحماية ({Fmt(protectionPrice)}) " +
+                          $"أقل ربحاً من الوقف الحالي ({Fmt(existingStop.Value)}) — لن يُرخّى الوقف. لا تعديل.");
                     return ProtectionOutcome.AlreadyProtected;
                 }
             }
 
-            if (!IsProtectiveStopOnValidSide(position, breakEvenPrice))
+            if (!IsProtectiveStopOnValidSide(position, protectionPrice))
             {
-                Print($"{LogPrefix} [حماية] ❌ المركز {role} #{positionId}: وقف التعادل ({Fmt(breakEvenPrice)}) " +
+                Print($"{LogPrefix} [حماية] ❌ المركز {role} #{positionId}: وقف الحماية ({Fmt(protectionPrice)}) " +
                       $"في الجهة الخاطئة من السوق (Bid={Fmt(_targetSymbol.Bid)} / Ask={Fmt(_targetSymbol.Ask)}) — " +
                       $"لم يُعدَّل الوقف، والوقف الأصلي يبقى قائماً.");
+                return ProtectionOutcome.Failed;
+            }
+
+            // الحد الأدنى لمسافة الوقف من السوق: إن كان الهدف المحسوب أقرب من المسموح
+            // فالوقف المطلوب غير قابل للإرسال؛ لا نقلّل الهدف الصافي لإرضاء القيد.
+            if (!IsProtectionStopFarEnoughFromMarket(position, protectionPrice, out errorReason))
+            {
+                Print($"{LogPrefix} [حماية] ❌ المركز {role} #{positionId}: {errorReason}");
+                return ProtectionOutcome.Failed;
+            }
+
+            if (!IsProtectionStopBeforeTakeProfit(position, protectionPrice))
+            {
+                Print($"{LogPrefix} [حماية] ❌ المركز {role} #{positionId}: وقف الحماية ({Fmt(protectionPrice)}) " +
+                      $"بلغ/تجاوز هدف الربح ({FmtNullable(position.TakeProfit)}) — لا يُعدَّل الوقف.");
                 return ProtectionOutcome.Failed;
             }
 
@@ -1343,7 +1388,7 @@ namespace cAlgo.Robots
             try
             {
                 // الأسعار مطلقة، وهدف الربح الحالي يُمرَّر صريحاً كي يبقى 50%/100% كما هو.
-                result = ModifyPosition(position, breakEvenPrice, position.TakeProfit, ProtectionType.Absolute);
+                result = ModifyPosition(position, protectionPrice, position.TakeProfit, ProtectionType.Absolute);
             }
             catch (Exception ex)
             {
@@ -1366,60 +1411,273 @@ namespace cAlgo.Robots
             }
 
             Print($"{LogPrefix} [حماية] ✅ المركز {role} #{positionId}: SL {FmtNullable(existingStop)} → " +
-                  $"{Fmt(breakEvenPrice)} (تعادل صافي بعد العمولات/السواب) | TP محفوظ: {FmtNullable(position.TakeProfit)}");
+                  $"{Fmt(protectionPrice)} (هدف صافي=${FmtUsd(targetNetUsd)}؛ إجمالي مطلوب=${FmtUsd(requiredGrossUsd)}؛ " +
+                  $"تكاليف معروفة/مقدَّرة=${FmtUsd(costsUsd)}) | TP محفوظ: {FmtNullable(position.TakeProfit)}");
+            Print($"{LogPrefix} [حماية] ℹ️ الهدف الصافي تقديري وليس مضموناً: الانزلاق عند تفعيل الوقف، والسواب " +
+                  $"المستحق بعد الحساب، والعمولة الفعلية عند الإغلاق قد تجعل النتيجة أقل من الهدف.");
             return ProtectionOutcome.Applied;
         }
 
         // ===========================================================================
-        //  حساب وقف التعادل الصافي بعد التكاليف
+        //  مرجع الهدف: ربح Position C المتوقع عند هدفه الأصلي 100%
         // ---------------------------------------------------------------------------
-        //  التكاليف المطبَّقة: عمولة الذهاب والعودة (Position.Commissions موثّقة كاتجاه واحد)
-        //  ناقص السواب إن كان دائناً. الانتشار مُحتسب أصلاً في سعر الدخول (Ask للشراء و Bid
-        //  للبيع)، فإغلاق الشراء عند سعر الدخول يعادل صفر ربح إجمالي — لا يُضاف الانتشار مرتين.
-        //  التقريب دائماً في اتجاه يغطي التكاليف: لأعلى للشراء ولأسفل للبيع.
+        //  C_OriginalTPProfit = |TP_C − Entry_C| × Volume_C × (PipValue / PipSize)
+        //  ProtectionTargetNetProfit = C_OriginalTPProfit × 1%  (نفس المبلغ لـ B و C)
+        //
+        //  - الدخول والحجم والهدف تُقرأ من Position C المفتوح: هذا الـcBot لا يعدّل
+        //    دخول C ولا حجمه ولا هدفه أبداً، فالقيم الحالية هي الأصلية ما لم يعدّلها
+        //    طرف خارجي (قيد موثَّق) — لا يوجد تخزين حالة على القرص في هذه المعمارية.
+        //  - PipValue موثّقة كالقيمة النقدية للنقطة في عملة الإيداع، وهي نفس الوحدة
+        //    المستخدمة أصلاً في حجم الصفقة (VolumeInUnits × pips × PipValue).
+        //  - الربح المتوقع هنا إجمالي (Gross) قبل التكاليف؛ التكاليف تُضاف في
+        //    TryComputeProtectionStop. هذا يطابق مثال $10 → $0.10.
+        //  - إن لم يكن C مفتوحاً أو بلا هدف صالح فلا هدف بديل: تفشل الحماية صراحةً
+        //    ولا تُستعمل صيغة التعادل القديمة.
         // ===========================================================================
-        private bool TryComputeBreakEvenStop(Position position, out double stopPrice, out string errorReason)
+        private bool TryComputeProtectionTargetNetProfit(
+            TradeGroup group, out double targetNetUsd, out string errorReason)
         {
-            stopPrice = 0.0;
+            targetNetUsd = 0.0;
             errorReason = null;
 
             var symbol = _targetSymbol;
-            if (symbol == null || symbol.PipSize <= 0 || symbol.PipValue <= 0)
+            if (symbol == null || !(symbol.PipSize > 0) || !(symbol.PipValue > 0))
             {
-                errorReason = "مواصفات الرمز غير صالحة لحساب التعادل (PipSize/PipValue)";
+                errorReason = "مواصفات الرمز غير صالحة لحساب ربح C المتوقع (PipSize/PipValue)";
                 return false;
             }
 
-            if (position.VolumeInUnits <= 0)
+            if (group == null || group.IdC == 0)
             {
-                errorReason = $"حجم المركز غير صالح ({position.VolumeInUnits})";
+                errorReason = "Position C لم يُفتح (IdC غير معروف) — ربحه الأصلي المتوقع غير متاح";
                 return false;
             }
 
-            var roundTripCommission = 2.0 * Math.Max(0.0, position.Commissions);
-            var costsUsd = roundTripCommission - position.Swap;
-            if (costsUsd < 0.0)
+            var positionC = FindOpenPositionById(group.IdC);
+            if (positionC == null)
             {
-                // لا نرخّي الوقف بسبب سواب دائن: الحد الأدنى هو نقطة الدخول نفسها.
-                costsUsd = 0.0;
+                errorReason = $"Position C #{group.IdC} غير مفتوح — لا يمكن قراءة سعر دخوله وحجمه وهدفه الأصلي";
+                return false;
             }
 
-            var costPerUnit = costsUsd / position.VolumeInUnits;
-            var costPips = costPerUnit / symbol.PipValue;
-            var costPriceDistance = costPips * symbol.PipSize;
+            string token;
+            string role;
+            if (!TryParseChildLabel(positionC.Label, out token, out role) ||
+                !string.Equals(token, group.Token, StringComparison.Ordinal) || role != RoleC)
+            {
+                errorReason = $"المركز #{positionC.Id} لا يطابق دور C في المجموعة {group.Token}";
+                return false;
+            }
+
+            if (!positionC.TakeProfit.HasValue)
+            {
+                errorReason = $"Position C #{positionC.Id} بلا هدف ربح — لا يمكن حساب الربح المتوقع عند 100%";
+                return false;
+            }
+
+            if (double.IsNaN(positionC.VolumeInUnits) || double.IsInfinity(positionC.VolumeInUnits) ||
+                positionC.VolumeInUnits <= 0.0)
+            {
+                errorReason = $"حجم Position C غير صالح ({Fmt(positionC.VolumeInUnits)})";
+                return false;
+            }
+
+            if (double.IsNaN(positionC.EntryPrice) || double.IsInfinity(positionC.EntryPrice) ||
+                positionC.EntryPrice <= 0.0)
+            {
+                errorReason = $"سعر دخول Position C غير صالح ({Fmt(positionC.EntryPrice)})";
+                return false;
+            }
+
+            var tpDistance = positionC.TradeType == TradeType.Buy
+                ? positionC.TakeProfit.Value - positionC.EntryPrice
+                : positionC.EntryPrice - positionC.TakeProfit.Value;
+
+            if (double.IsNaN(tpDistance) || double.IsInfinity(tpDistance) || tpDistance <= 0.0)
+            {
+                errorReason = $"هدف Position C ({FmtNullable(positionC.TakeProfit)}) ليس في اتجاه الربح من " +
+                              $"الدخول ({Fmt(positionC.EntryPrice)}) — لا يمكن حساب الربح المتوقع";
+                return false;
+            }
+
+            var valuePerPriceUnitPerVolume = symbol.PipValue / symbol.PipSize;
+            if (double.IsNaN(valuePerPriceUnitPerVolume) || double.IsInfinity(valuePerPriceUnitPerVolume) ||
+                valuePerPriceUnitPerVolume <= 0.0)
+            {
+                errorReason = "تحويل السعر إلى نقود غير صالح (PipValue/PipSize)";
+                return false;
+            }
+
+            var cExpectedTpProfitUsd = tpDistance * positionC.VolumeInUnits * valuePerPriceUnitPerVolume;
+            if (double.IsNaN(cExpectedTpProfitUsd) || double.IsInfinity(cExpectedTpProfitUsd) ||
+                cExpectedTpProfitUsd <= 0.0)
+            {
+                errorReason = $"ربح Position C المتوقع عند هدفه غير صالح ({Fmt(cExpectedTpProfitUsd)})";
+                return false;
+            }
+
+            targetNetUsd = cExpectedTpProfitUsd * ProtectionNetProfitFractionOfC;
+            if (double.IsNaN(targetNetUsd) || double.IsInfinity(targetNetUsd) || targetNetUsd <= 0.0)
+            {
+                errorReason = $"هدف الحماية الصافي المحسوب غير صالح ({Fmt(targetNetUsd)})";
+                return false;
+            }
+
+            Print($"{LogPrefix} [حماية] مرجع الهدف: Position C #{positionC.Id} | دخول={Fmt(positionC.EntryPrice)} | " +
+                  $"TP={FmtNullable(positionC.TakeProfit)} | مسافة 100%={FmtUsd(tpDistance)} سعر | " +
+                  $"حجم={Fmt(positionC.VolumeInUnits)} | ربح C المتوقع عند TP=${FmtUsd(cExpectedTpProfitUsd)} " +
+                  $"⇒ هدف صافي لكل من B و C = ${FmtUsd(targetNetUsd)} (1% منه، قيمة ديناميكية وليست مبلغاً ثابتاً).");
+            return true;
+        }
+
+        // ===========================================================================
+        //  تحويل الهدف الصافي إلى سعر وقف لمركز واحد
+        // ---------------------------------------------------------------------------
+        //  requiredGross = targetNet + costs
+        //  costs = عمولة الاتجاه الواحد + عمولة الإغلاق المقدَّرة − Swap
+        //  distance = (requiredGross / VolumeInUnits) / (PipValue / PipSize)
+        //
+        //  - Position.Commissions موثّقة كعمولة "اتجاه واحد": تُؤخذ المقدار (لا الإشارة،
+        //    لأن إشارتها غير موثّقة) والعمولة تكلفة في الحالتين. عمولة الإغلاق غير معروفة
+        //    قبل التنفيذ؛ تُقدَّر بمساواة عمولة الفتح. هذا هو الفرق الوحيد عن NetProfit
+        //    الحقيقي عند الإغلاق. (NetProfit في المنصة/Open API لا يشمل عمولة الإغلاق.)
+        //  - Swap الحالي معروف وموقَّع: السالب تكلفة والموجب رصيد دائن يقلّل المطلوب.
+        //  - الانتشار محتسب أصلاً في سعر الدخول (Ask للشراء و Bid للبيع): إغلاق الشراء
+        //    عند سعر الدخول يعادل صفر ربح إجمالي، فلا يُضاف الانتشار مرة ثانية.
+        //  - التقريب دائماً في اتجاه يزيد الربح (لأعلى للشراء ولأسفل للبيع).
+        // ===========================================================================
+        private bool TryComputeProtectionStop(
+            Position position,
+            double targetNetUsd,
+            out double stopPrice,
+            out double requiredGrossUsd,
+            out double costsUsd,
+            out string errorReason)
+        {
+            stopPrice = 0.0;
+            requiredGrossUsd = 0.0;
+            costsUsd = 0.0;
+            errorReason = null;
+
+            var symbol = _targetSymbol;
+            if (symbol == null || !(symbol.PipSize > 0) || !(symbol.PipValue > 0) || !(symbol.TickSize > 0))
+            {
+                errorReason = "مواصفات الرمز غير صالحة لحساب وقف الحماية (PipSize/PipValue/TickSize)";
+                return false;
+            }
+
+            if (double.IsNaN(targetNetUsd) || double.IsInfinity(targetNetUsd) || targetNetUsd <= 0.0)
+            {
+                errorReason = $"هدف الربح الصافي غير صالح ({Fmt(targetNetUsd)})";
+                return false;
+            }
+
+            if (!(position.VolumeInUnits > 0.0) ||
+                double.IsNaN(position.VolumeInUnits) || double.IsInfinity(position.VolumeInUnits))
+            {
+                errorReason = $"حجم المركز غير صالح ({Fmt(position.VolumeInUnits)})";
+                return false;
+            }
+
+            if (double.IsNaN(position.Commissions) || double.IsInfinity(position.Commissions))
+            {
+                errorReason = $"عمولة المركز غير صالحة ({Fmt(position.Commissions)})";
+                return false;
+            }
+
+            if (double.IsNaN(position.Swap) || double.IsInfinity(position.Swap))
+            {
+                errorReason = $"سواب المركز غير صالح ({Fmt(position.Swap)})";
+                return false;
+            }
+
+            // عمولة الفتح (معروفة) + تقدير عمولة الإغلاق (نفس المقدار، غير معروفة بدقة).
+            var oneWayCommissionUsd = Math.Abs(position.Commissions);
+            var estimatedClosingCommissionUsd = oneWayCommissionUsd;
+            costsUsd = oneWayCommissionUsd + estimatedClosingCommissionUsd - position.Swap;
+
+            requiredGrossUsd = targetNetUsd + costsUsd;
+            if (requiredGrossUsd < 0.0)
+            {
+                // سواب دائن أكبر من الهدف + التكاليف: دخول بلا ربح إجمالي يحقق الهدف،
+                // ولا يوجد سبب لوقف أفضل من الدخول لمجرد رصيد سواب.
+                requiredGrossUsd = 0.0;
+            }
+
+            var valuePerPriceUnitPerVolume = symbol.PipValue / symbol.PipSize;
+            var priceDistance = (requiredGrossUsd / position.VolumeInUnits) / valuePerPriceUnitPerVolume;
+
+            if (double.IsNaN(priceDistance) || double.IsInfinity(priceDistance) || priceDistance < 0.0)
+            {
+                errorReason = $"مسافة وقف الحماية المحسوبة غير صالحة ({Fmt(priceDistance)})";
+                return false;
+            }
 
             var raw = position.TradeType == TradeType.Buy
-                ? position.EntryPrice + costPriceDistance
-                : position.EntryPrice - costPriceDistance;
+                ? position.EntryPrice + priceDistance
+                : position.EntryPrice - priceDistance;
 
             stopPrice = RoundPriceToTick(raw, position.TradeType);
             if (double.IsNaN(stopPrice) || double.IsInfinity(stopPrice) || stopPrice <= 0.0)
             {
-                errorReason = $"سعر التعادل المحسوب غير صالح ({stopPrice})";
+                errorReason = $"سعر وقف الحماية المحسوب غير صالح ({Fmt(stopPrice)})";
+                return false;
+            }
+
+            Print($"{LogPrefix} [حماية] حساب المركز #{position.Id}: هدف صافي=${FmtUsd(targetNetUsd)} | " +
+                  $"عمولة اتجاه=${FmtUsd(oneWayCommissionUsd)} ×2 (الإغلاق مقدَّر) | سواب={FmtUsd(position.Swap)} | " +
+                  $"تكاليف=${FmtUsd(costsUsd)} | إجمالي مطلوب=${FmtUsd(requiredGrossUsd)} | " +
+                  $"المسافة={FmtUsd(priceDistance)} سعر | الوقف={Fmt(stopPrice)}");
+            return true;
+        }
+
+        // الحد الأدنى الموثّق لمسافة الوقف يُقاس من سعر السوق الحالي (Open API:
+        // slDistance = Minimum allowed distance between stop loss and current market price).
+        // لا نعدّل الوقف ليبعد أكثر كي لا نقلّل الربح المستهدف: إن كان الهدف أقرب من
+        // الحد الأدنى فالهدف غير قابل للتنفيذ ونفشل بوضوح بدل ادعاء حماية أو خفض الهدف.
+        private bool IsProtectionStopFarEnoughFromMarket(Position position, double stopPrice, out string errorReason)
+        {
+            errorReason = null;
+            var symbol = _targetSymbol;
+            if (symbol == null || !(symbol.MinStopLossDistance > 0.0))
+            {
+                return true;
+            }
+
+            if (symbol.MinDistanceType != SymbolMinDistanceType.Pips)
+            {
+                errorReason = $"الحد الأدنى لمسافة الوقف بنوع '{symbol.MinDistanceType}' غير مدعوم بوضوح " +
+                              $"(القيمة={Fmt(symbol.MinStopLossDistance)}) — لم يُعدَّل الوقف.";
+                return false;
+            }
+
+            var minPriceDistance = symbol.MinStopLossDistance * symbol.PipSize;
+            var marketPrice = position.TradeType == TradeType.Buy ? symbol.Bid : symbol.Ask;
+            var actualDistance = position.TradeType == TradeType.Buy
+                ? marketPrice - stopPrice
+                : stopPrice - marketPrice;
+
+            if (actualDistance + 1e-9 < minPriceDistance)
+            {
+                errorReason = $"وقف الحماية ({Fmt(stopPrice)}) أقرب إلى السوق من الحد الأدنى " +
+                              $"({Fmt(symbol.MinStopLossDistance)} pip = {FmtUsd(minPriceDistance)} سعر؛ " +
+                              $"المسافة الفعلية={FmtUsd(actualDistance)}). لم يُعدَّل الوقف ولم يُخفَّض الهدف.";
                 return false;
             }
 
             return true;
+        }
+
+        private static bool IsProtectionStopBeforeTakeProfit(Position position, double stopPrice)
+        {
+            if (!position.TakeProfit.HasValue)
+            {
+                return false;
+            }
+
+            return position.TradeType == TradeType.Buy
+                ? stopPrice < position.TakeProfit.Value
+                : stopPrice > position.TakeProfit.Value;
         }
 
         private double RoundPriceToTick(double price, TradeType tradeType)
@@ -1661,6 +1919,12 @@ namespace cAlgo.Robots
         private static string Fmt(double value)
         {
             return value.ToString("0.###", CultureInfo.InvariantCulture);
+        }
+
+        // للمبالغ النقدية وأسعار الوقف المحسوبة: دقة أعلى كي لا يخفي السجل فروقاً صغيرة.
+        private static string FmtUsd(double value)
+        {
+            return value.ToString("0.#####", CultureInfo.InvariantCulture);
         }
 
         private static string FmtNullable(double? value)

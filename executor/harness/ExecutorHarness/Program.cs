@@ -77,6 +77,9 @@ namespace ExecutorHarness
         public double Min = 1.0;
         public double Max = 1000000.0;
         public double Step = 1.0;
+        // موثّق في cAlgo.API: MinStopLossDistance + MinDistanceType (Pips/Percentage).
+        public double MinStopLossDistance = 0.0;
+        public SymbolMinDistanceType MinDistanceType = SymbolMinDistanceType.Pips;
     }
 
     internal sealed class ExecSettings
@@ -255,6 +258,8 @@ namespace ExecutorHarness
                 VolumeInUnitsMin = s.Spec.Min,
                 VolumeInUnitsMax = s.Spec.Max,
                 VolumeInUnitsStep = s.Spec.Step,
+                MinStopLossDistance = s.Spec.MinStopLossDistance,
+                MinDistanceType = s.Spec.MinDistanceType,
             };
 
             var barStart = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -422,6 +427,17 @@ namespace ExecutorHarness
         private static Position PositionByRole(ExecFixture fx, string role)
         {
             return fx.Positions.FirstOrDefault(p => LabelRoles.Role(p.Label) == role);
+        }
+
+        // صافي الربح التقديري عند سعر وقف معيّن بنفس صيغة الـcBot: إجمالي المسافة
+        // مضروبة في قيمة الوحدة، ناقص التكاليف المعروفة/المقدّرة. تُستخدم للتحقق من أن
+        // التقريب لم يُنزل النتيجة تحت الهدف — وليست ادعاءً بضمان التنفيذ الفعلي.
+        private static double EstimatedNetAt(Position position, double stopPrice, Symbol symbol)
+        {
+            var gross = Math.Abs(stopPrice - position.EntryPrice) / symbol.PipSize * symbol.PipValue *
+                        position.VolumeInUnits;
+            var costs = 2.0 * Math.Abs(position.Commissions) - position.Swap;
+            return gross - costs;
         }
 
         // محاكاة وصول السوق إلى هدف Position A = 20% من مسافة TP الأصلية (22.5 pip) = 4.5 pip.
@@ -1047,12 +1063,18 @@ namespace ExecutorHarness
                 var callC = fx.Bot.ModifyCalls.FirstOrDefault(c => c.PositionId == posC.Id);
 
                 Check(fx.Bot.ModifyCalls.Count == 2, $"S3: تعديلان فقط (B و C) بعد إغلاق A (الفعلي={fx.Bot.ModifyCalls.Count})");
-                // B: عمولة 0.05 × 2 = 0.10 على 3 وحدات ⇒ 0.0333 سعر ⇒ تقريب لأعلى ⇒ 2000.14
-                Check(callB != null && Math.Abs(callB.StopLoss.GetValueOrDefault() - 2000.14) < 1e-9,
-                    $"S3: تعادل B يشمل العمولة = 2000.14 (الفعلي={callB?.StopLoss})");
-                // C: + سواب -0.20 ⇒ 0.30 على 3 وحدات ⇒ 0.10 سعر ⇒ 2000.20
-                Check(callC != null && Math.Abs(callC.StopLoss.GetValueOrDefault() - 2000.20) < 1e-9,
-                    $"S3: تعادل C يشمل العمولة والسواب = 2000.20 (الفعلي={callC?.StopLoss})");
+                // C's TP profit = 2.25 × 3 × (0.1/0.1) = $6.75 ⇒ target net = $0.0675.
+                // B: تكاليف 0.05×2 = 0.10 ⇒ إجمالي 0.1675 على 3 وحدات ⇒ 0.05583 سعر ⇒ تقريب لأعلى ⇒ 2000.16
+                Check(callB != null && Math.Abs(callB.StopLoss.GetValueOrDefault() - 2000.16) < 1e-9,
+                    $"S3: وقف B يحقق صافي 0.0675 مع العمولة = 2000.16 (الفعلي={callB?.StopLoss})");
+                // C: + سواب -0.20 ⇒ تكاليف 0.30 ⇒ إجمالي 0.3675 ⇒ 0.1225 سعر ⇒ 2000.23
+                Check(callC != null && Math.Abs(callC.StopLoss.GetValueOrDefault() - 2000.23) < 1e-9,
+                    $"S3: وقف C يحقق نفس الصافي مع العمولة والسواب = 2000.23 (الفعلي={callC?.StopLoss})");
+                Check(Contains(fx.Bot, "ربح C المتوقع عند TP=$6.75") && Contains(fx.Bot, "= $0.0675 (1%"),
+                    "S3: سُجِّل ربح C المرجعي وهدف 1% الصافي");
+                Check(EstimatedNetAt(posB, posB.StopLoss.GetValueOrDefault(), fx.Symbol) >= 0.0675 - 1e-9 &&
+                      EstimatedNetAt(posC, posC.StopLoss.GetValueOrDefault(), fx.Symbol) >= 0.0675 - 1e-9,
+                    "S3: صافي B و C التقديري عند الوقف ≥ هدف 1% (التقريب لم يُنزل تحته)");
                 Check(callB != null && callB.ProtectionType == ProtectionType.Absolute,
                     "S3: التعديل بأسعار مطلقة (ProtectionType.Absolute)");
                 Check(callB != null && callB.TakeProfit == tpB && callC != null && callC.TakeProfit == tpC,
@@ -1085,6 +1107,9 @@ namespace ExecutorHarness
                 var posA = PositionByRole(fx, "A");
                 MoveMarketToA(fx, TradeType.Buy);
 
+                // مجرد وصول السوق إلى هدف A لا يفعّل الحماية — التفعيل يتطلب حدث إغلاق فعلي.
+                Check(fx.Bot.ModifyCalls.Count == 0, "S4: لمس السعر لهدف A بلا إغلاق لا يفعّل الحماية");
+
                 fx.Positions.CloseForTest(posB, netProfit: 2.0, reason: PositionCloseReason.TakeProfit);
                 Check(fx.Bot.ModifyCalls.Count == 0, "S4: إغلاق B عند هدفه لا يفعّل الحماية");
                 Check(Contains(fx.Bot, "ليس Position A"), "S4: سُجِّل أن المركز المغلق ليس A");
@@ -1116,8 +1141,10 @@ namespace ExecutorHarness
                 Check(posB.StopLoss.GetValueOrDefault() < posB.EntryPrice &&
                       posC.StopLoss.GetValueOrDefault() < posC.EntryPrice,
                     "S5: وقف SELL أسفل سعر الدخول (تغطية التكاليف)");
-                Check(Math.Abs(posB.StopLoss.GetValueOrDefault() - 1999.96) < 1e-9,
-                    $"S5: تعادل B للبيع = 1999.96 (الفعلي={posB.StopLoss})");
+                Check(Math.Abs(posB.StopLoss.GetValueOrDefault() - 1999.94) < 1e-9,
+                    $"S5: وقف B للبيع يحقق صافي 0.0675 = 1999.94 (الفعلي={posB.StopLoss})");
+                Check(EstimatedNetAt(posB, posB.StopLoss.GetValueOrDefault(), fx.Symbol) >= 0.0675 - 1e-9,
+                    "S5: صافي B التقديري عند الوقف ≥ هدف 1% للبيع");
                 Check(posB.StopLoss.GetValueOrDefault() > fx.Symbol.Ask,
                     "S5: الوقف أعلى من Ask الحالي ⇒ جهة صحيحة للبيع");
                 Check(posB.TakeProfit.HasValue && posC.TakeProfit.HasValue,
@@ -1140,7 +1167,7 @@ namespace ExecutorHarness
                 var slB = posB.StopLoss;
                 var slC = posC.StopLoss;
 
-                // السوق لم يتحرك: وقف التعادل (2000.14) أعلى من Bid (2000.0) ⇒ طلب غير صالح.
+                // السوق لم يتحرك: وقف الحماية (2000.16) أعلى من Bid (2000.0) ⇒ طلب غير صالح.
                 fx.Positions.CloseForTest(posA, netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
 
                 Check(fx.Bot.ModifyCalls.Count == 0, "S6: لم يُرسل أي تعديل غير صالح للمنصة");
@@ -1331,9 +1358,9 @@ namespace ExecutorHarness
 
                 RestartBot(fx);
 
-                Check(Contains(fx.Bot, "عند التعادل مسبقاً"), "S12: اكتُشف أن B/C عند التعادل بعد إعادة التشغيل");
+                Check(Contains(fx.Bot, "وقف حماية سابق"), "S12: اكتُشف أن B/C تحت وقف حماية سابق بعد إعادة التشغيل");
                 Check(fx.Bot.ModifyCalls.Count == 0, "S12: لا تعديل مكرّر بعد إعادة التشغيل");
-                Check(posB.StopLoss == protectedSlB && posC.StopLoss == protectedSlC, "S12: وقف التعادل محفوظ");
+                Check(posB.StopLoss == protectedSlB && posC.StopLoss == protectedSlC, "S12: وقف الحماية محفوظ");
 
                 WriteLog(opts, "scenario_S12_restart_already_protected.log", fx.Bot);
                 summary.Add("S12 restart-already-protected: no repeat modification");
@@ -1375,7 +1402,7 @@ namespace ExecutorHarness
                 fx.Positions.CloseForTest(lateA, netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
 
                 Check(fx.Bot.ModifyCalls.Count == 2, $"S13: الحدث المتأخر فعّل الحماية (الفعلي={fx.Bot.ModifyCalls.Count})");
-                Check(posB.StopLoss.GetValueOrDefault() > posB.EntryPrice, "S13: وقف B نُقل للتعادل بعد الحدث المتأخر");
+                Check(posB.StopLoss.GetValueOrDefault() > posB.EntryPrice, "S13: وقف B نُقل لوقف حماية فوق الدخول بعد الحدث المتأخر");
 
                 // حدث مكرّر لنفس المركز المتأخر: لا تعديل إضافي.
                 fx.Positions.CloseForTest(lateA, netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
@@ -1383,6 +1410,443 @@ namespace ExecutorHarness
 
                 WriteLog(opts, "scenario_S13_delayed_close_event.log", fx.Bot);
                 summary.Add($"S13 delayed-close-after-restart: modifies={fx.Bot.ModifyCalls.Count}");
+            }
+
+            // === S14: ربح C المتوقع $10 ⇒ $0.10 صافي لكل من B و C ================
+            {
+                var s = new ExecSettings
+                {
+                    Action = "buy",
+                    SizeUsd = 20.0,
+                    AtrTarget = 10.0 / 9.0,
+                    CommissionPerPosition = 0.05,
+                };
+                var fx = BuildExecFixture(s);
+                fx.Bot.TestStart();
+                RaiseBar(fx);
+
+                var posA = PositionByRole(fx, "A");
+                var posB = PositionByRole(fx, "B");
+                var posC = PositionByRole(fx, "C");
+                var tpB = posB.TakeProfit;
+                var tpC = posC.TakeProfit;
+                var originalSlB = posB.StopLoss;
+                var originalSlC = posC.StopLoss;
+
+                // C: حجم 4، مسافة TP = 2.5 سعر ⇒ الربح المتوقع عند TP = 10.00 USD.
+                Check(Math.Abs(posC.VolumeInUnits - 4.0) < 1e-9,
+                    $"S14: حجم C = 4 (الفعلي={posC.VolumeInUnits})");
+                var cExpected = Math.Abs(tpC.GetValueOrDefault() - posC.EntryPrice) / fx.Symbol.PipSize *
+                                fx.Symbol.PipValue * posC.VolumeInUnits;
+                Check(Math.Abs(cExpected - 10.0) < 1e-6,
+                    $"S14: ربح C المتوقع عند TP = $10 (الفعلي={cExpected})");
+
+                // القرار الأصلي لم يتغيّر: 3 أوامر بأحجام 4/4/4 وأهداف 5/12.5/25 pip.
+                Check(fx.Orders.Count == 3, "S14: ثلاثة أوامر قبل الحماية");
+                Check(Math.Abs(fx.Orders[0].Volume - 4.0) < 1e-9 &&
+                      Math.Abs(fx.Orders[1].Volume - 4.0) < 1e-9 &&
+                      Math.Abs(fx.Orders[2].Volume - 4.0) < 1e-9,
+                    "S14: أحجام الأوامر الأصلية 4/4/4 بلا تغيير");
+                Check(Math.Abs(fx.Orders[0].TakeProfitPips.GetValueOrDefault() - 5.0) < 1e-6 &&
+                      Math.Abs(fx.Orders[1].TakeProfitPips.GetValueOrDefault() - 12.5) < 1e-6 &&
+                      Math.Abs(fx.Orders[2].TakeProfitPips.GetValueOrDefault() - 25.0) < 1e-6,
+                    "S14: مسافات TP الأصلية 20%/50%/100% بلا تغيير");
+
+                MoveMarketToA(fx, TradeType.Buy);
+                fx.Positions.CloseForTest(posA, netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
+
+                var callB = fx.Bot.ModifyCalls.FirstOrDefault(c => c.PositionId == posB.Id);
+                var callC = fx.Bot.ModifyCalls.FirstOrDefault(c => c.PositionId == posC.Id);
+
+                Check(fx.Bot.ModifyCalls.Count == 2, "S14: تعديلان فقط (B و C)");
+                Check(Contains(fx.Bot, "ربح C المتوقع عند TP=$10") && Contains(fx.Bot, "= $0.1 (1%"),
+                    "S14: $10 → هدف صافي $0.10 (1% ديناميكي)");
+                // لكل من B و C: (0.10 هدف + 0.10 عمولة×2) / 4 وحدة = 0.05 سعر ⇒ 2000.15
+                Check(callB != null && Math.Abs(callB.StopLoss.GetValueOrDefault() - 2000.15) < 1e-9,
+                    $"S14: وقف B = 2000.15 (الفعلي={callB?.StopLoss})");
+                Check(callC != null && Math.Abs(callC.StopLoss.GetValueOrDefault() - 2000.15) < 1e-9,
+                    $"S14: وقف C = 2000.15 (الفعلي={callC?.StopLoss})");
+                Check(EstimatedNetAt(posB, posB.StopLoss.GetValueOrDefault(), fx.Symbol) >= 0.10 - 1e-9,
+                    "S14: صافي B عند الوقف ≥ 0.10");
+                Check(EstimatedNetAt(posC, posC.StopLoss.GetValueOrDefault(), fx.Symbol) >= 0.10 - 1e-9,
+                    "S14: صافي C عند الوقف ≥ 0.10");
+                Check(posB.TakeProfit == tpB && posC.TakeProfit == tpC,
+                    "S14: أهداف B (50%) و C (100%) لم تتغيّر");
+                Check(posB.StopLoss != originalSlB && posC.StopLoss != originalSlC,
+                    "S14: الأوقاف الأصلية استُبدلت بأوقاف الحماية");
+
+                WriteLog(opts, "scenario_S14_protection_10_to_010.log", fx.Bot);
+                summary.Add($"S14 target-10→0.10: SL_B={posB.StopLoss}, SL_C={posC.StopLoss}");
+            }
+
+            // === S15: ربح C المتوقع $25 ⇒ $0.25 صافي لكل من B و C ================
+            {
+                var s = new ExecSettings
+                {
+                    Action = "buy",
+                    SizeUsd = 20.0,
+                    AtrTarget = 10.0 / 9.0,
+                    CommissionPerPosition = 0.05,
+                };
+                var fx = BuildExecFixture(s);
+                fx.Bot.TestStart();
+                RaiseBar(fx);
+
+                var posA = PositionByRole(fx, "A");
+                var posB = PositionByRole(fx, "B");
+                var posC = PositionByRole(fx, "C");
+
+                // مسافة هدف C الأصلية 6.25 سعر مع حجم 4 ⇒ 25.00 USD عند TP.
+                posC.TakeProfit = posC.EntryPrice + 6.25;
+                var tpB = posB.TakeProfit;
+                var tpC = posC.TakeProfit;
+
+                MoveMarketToA(fx, TradeType.Buy);
+                fx.Positions.CloseForTest(posA, netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
+
+                var callB = fx.Bot.ModifyCalls.FirstOrDefault(c => c.PositionId == posB.Id);
+                var callC = fx.Bot.ModifyCalls.FirstOrDefault(c => c.PositionId == posC.Id);
+
+                Check(Contains(fx.Bot, "ربح C المتوقع عند TP=$25") && Contains(fx.Bot, "= $0.25 (1%"),
+                    "S15: $25 → هدف صافي $0.25 (1% ديناميكي)");
+                // (0.25 + 0.10) / 4 = 0.0875 ⇒ 2000.1875 ⇒ تقريب لأعلى إلى 0.01 ⇒ 2000.19
+                Check(callB != null && Math.Abs(callB.StopLoss.GetValueOrDefault() - 2000.19) < 1e-9,
+                    $"S15: وقف B = 2000.19 بعد تقريب لأعلى (الفعلي={callB?.StopLoss})");
+                Check(callC != null && Math.Abs(callC.StopLoss.GetValueOrDefault() - 2000.19) < 1e-9,
+                    $"S15: وقف C = 2000.19 (الفعلي={callC?.StopLoss})");
+                Check(EstimatedNetAt(posB, posB.StopLoss.GetValueOrDefault(), fx.Symbol) >= 0.25 - 1e-9,
+                    "S15: التقريب لأعلى لم يُنزل صافي B تحت 0.25");
+                Check(posB.TakeProfit == tpB && posC.TakeProfit == tpC, "S15: TP B/C محفوظان");
+
+                WriteLog(opts, "scenario_S15_protection_25_to_025.log", fx.Bot);
+                summary.Add($"S15 target-25→0.25: SL_B={posB.StopLoss}, SL_C={posC.StopLoss}");
+            }
+
+            // === S16: نفس الهدف النقدي مع أحجام مختلفة ⇒ وقفان مستقلان =============
+            {
+                var s = new ExecSettings
+                {
+                    Action = "buy",
+                    SizeUsd = 20.0,
+                    AtrTarget = 10.0 / 9.0,
+                    CommissionPerPosition = 0.05,
+                };
+                var fx = BuildExecFixture(s);
+                fx.Bot.TestStart();
+                RaiseBar(fx);
+
+                var posA = PositionByRole(fx, "A");
+                var posB = PositionByRole(fx, "B");
+                var posC = PositionByRole(fx, "C");
+
+                // حجم C = 8 (بدل 4) ⇒ ربحه المتوقع 2.5 × 8 = 20 ⇒ الهدف 0.20 لكل من B و C.
+                posC.VolumeInUnits = 8.0;
+
+                MoveMarketToA(fx, TradeType.Buy);
+                fx.Positions.CloseForTest(posA, netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
+
+                var callB = fx.Bot.ModifyCalls.FirstOrDefault(c => c.PositionId == posB.Id);
+                var callC = fx.Bot.ModifyCalls.FirstOrDefault(c => c.PositionId == posC.Id);
+
+                Check(Contains(fx.Bot, "= $0.2 (1%"),
+                    "S16: الهدف النقدي المشترك = 0.20 لكل من B و C");
+                // B: (0.20 + 0.10) / 4 = 0.075 ⇒ 2000.175 ⇒ 2000.18
+                Check(callB != null && Math.Abs(callB.StopLoss.GetValueOrDefault() - 2000.18) < 1e-9,
+                    $"S16: وقف B (حجم 4) = 2000.18 (الفعلي={callB?.StopLoss})");
+                // C: (0.20 + 0.10) / 8 = 0.0375 ⇒ 2000.1375 ⇒ 2000.14
+                Check(callC != null && Math.Abs(callC.StopLoss.GetValueOrDefault() - 2000.14) < 1e-9,
+                    $"S16: وقف C (حجم 8) = 2000.14 (الفعلي={callC?.StopLoss})");
+                Check(callB != null && callC != null &&
+                      Math.Abs(callB.StopLoss.GetValueOrDefault() - callC.StopLoss.GetValueOrDefault()) > 1e-6,
+                    "S16: الوقفان مختلفان رغم وحدة الهدف النقدي");
+                Check(EstimatedNetAt(posB, posB.StopLoss.GetValueOrDefault(), fx.Symbol) >= 0.20 - 1e-9 &&
+                      EstimatedNetAt(posC, posC.StopLoss.GetValueOrDefault(), fx.Symbol) >= 0.20 - 1e-9,
+                    "S16: صافي كل مركز ≥ 0.20 رغم اختلاف الأحجام");
+
+                WriteLog(opts, "scenario_S16_protection_different_volumes.log", fx.Bot);
+                summary.Add($"S16 different-volumes: SL_B={posB.StopLoss}, SL_C={posC.StopLoss}");
+            }
+
+            // === S17: البيع — $25 → $0.25 وتقريب السعر لأسفل =======================
+            {
+                var s = new ExecSettings
+                {
+                    Action = "sell",
+                    SizeUsd = 20.0,
+                    AtrTarget = 10.0 / 9.0,
+                    CommissionPerPosition = 0.05,
+                };
+                var fx = BuildExecFixture(s);
+                fx.Bot.TestStart();
+                RaiseBar(fx);
+
+                var posA = PositionByRole(fx, "A");
+                var posB = PositionByRole(fx, "B");
+                var posC = PositionByRole(fx, "C");
+                posC.TakeProfit = posC.EntryPrice - 6.25; // 25.00 USD على حجم 4
+                var tpB = posB.TakeProfit;
+                var tpC = posC.TakeProfit;
+
+                MoveMarketToA(fx, TradeType.Sell);
+                fx.Positions.CloseForTest(posA, netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
+
+                Check(Contains(fx.Bot, "= $0.25 (1%"), "S17: هدف SELL الصافي = 0.25");
+                Check(Math.Abs(posB.StopLoss.GetValueOrDefault() - 1999.91) < 1e-9,
+                    $"S17: وقف B للبيع = 1999.91 (الفعلي={posB.StopLoss})");
+                Check(posB.StopLoss.GetValueOrDefault() < posB.EntryPrice &&
+                      posC.StopLoss.GetValueOrDefault() < posC.EntryPrice,
+                    "S17: وقف SELL أسفل الدخول وفي جهة الربح");
+                Check(posB.StopLoss.GetValueOrDefault() > fx.Symbol.Ask,
+                    "S17: الوقف أعلى من Ask الحالي ⇒ جهة صحيحة للبيع");
+                Check(EstimatedNetAt(posB, posB.StopLoss.GetValueOrDefault(), fx.Symbol) >= 0.25 - 1e-9,
+                    "S17: تقريب لأسفل لم يُنزل صافي SELL تحت 0.25");
+                Check(posB.TakeProfit == tpB && posC.TakeProfit == tpC, "S17: TP B/C محفوظان");
+
+                WriteLog(opts, "scenario_S17_protection_sell_25.log", fx.Bot);
+                summary.Add($"S17 sell-target: SL_B={posB.StopLoss}, Ask={fx.Symbol.Ask}");
+            }
+
+            // === S18: إشارة العمولة (موجب/سالب) والتأثير المتوقّع للسواب ==========
+            {
+                var baseSettings = new ExecSettings
+                {
+                    Action = "buy",
+                    SizeUsd = 20.0,
+                    AtrTarget = 10.0 / 9.0,
+                    CommissionPerPosition = 0.05,
+                };
+                var positive = BuildExecFixture(baseSettings);
+                positive.Bot.TestStart();
+                RaiseBar(positive);
+                MoveMarketToA(positive, TradeType.Buy);
+                positive.Positions.CloseForTest(PositionByRole(positive, "A"), netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
+
+                var negativeSettings = new ExecSettings
+                {
+                    Action = "buy",
+                    SizeUsd = 20.0,
+                    AtrTarget = 10.0 / 9.0,
+                    CommissionPerPosition = -0.05,
+                };
+                var negative = BuildExecFixture(negativeSettings);
+                negative.Bot.TestStart();
+                RaiseBar(negative);
+                MoveMarketToA(negative, TradeType.Buy);
+                negative.Positions.CloseForTest(PositionByRole(negative, "A"), netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
+
+                var posBp = PositionByRole(positive, "B");
+                var posBn = PositionByRole(negative, "B");
+                Check(Math.Abs(posBp.StopLoss.GetValueOrDefault() - posBn.StopLoss.GetValueOrDefault()) < 1e-9,
+                    $"S18: إشارة العمولة لا تغيّر الوقف (موجب={posBp.StopLoss}، سالب={posBn.StopLoss})");
+                Check(Math.Abs(posBp.StopLoss.GetValueOrDefault() - 2000.15) < 1e-9,
+                    "S18: العمولة تُحسب تكلفةً في الحالتين (2000.15)");
+
+                // سواب سالب (تكلفة) على C يرفع وقفه بالمقدار المعروف: 0.20/4 = 0.05 سعر.
+                var debit = BuildExecFixture(baseSettings);
+                debit.Bot.TestStart();
+                RaiseBar(debit);
+                var debitC = PositionByRole(debit, "C");
+                debitC.Swap = -0.20;
+                MoveMarketToA(debit, TradeType.Buy);
+                debit.Positions.CloseForTest(PositionByRole(debit, "A"), netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
+                var debitB = PositionByRole(debit, "B");
+                Check(Math.Abs(debitB.StopLoss.GetValueOrDefault() - 2000.15) < 1e-9,
+                    $"S18: سواب C لا يغيّر وقف B (الفعلي={debitB.StopLoss})");
+                Check(Math.Abs(debitC.StopLoss.GetValueOrDefault() - 2000.20) < 1e-9,
+                    $"S18: سواب سالب -0.20 على C يرفع وقفه إلى 2000.20 (الفعلي={debitC.StopLoss})");
+                Check(EstimatedNetAt(debitC, debitC.StopLoss.GetValueOrDefault(), debit.Symbol) >= 0.10 - 1e-9,
+                    "S18: صافي C بعد السواب السالب ≥ 0.10");
+
+                // سواب موجب (رصيد دائن) يقلّل الإجمالي المطلوب؛ وعندما يتجاوز الهدف +
+                // التكاليف يصبح الوقف عند الدخول، مع بقاء الصافي ≥ الهدف.
+                var credit = BuildExecFixture(baseSettings);
+                credit.Bot.TestStart();
+                RaiseBar(credit);
+                var creditC = PositionByRole(credit, "C");
+                creditC.Swap = 0.20;
+                MoveMarketToA(credit, TradeType.Buy);
+                credit.Positions.CloseForTest(PositionByRole(credit, "A"), netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
+                Check(Math.Abs(creditC.StopLoss.GetValueOrDefault() - creditC.EntryPrice) < 1e-9,
+                    $"S18: سواب دائن 0.20 ⇒ الوقف عند الدخول (الفعلي={creditC.StopLoss})");
+                Check(EstimatedNetAt(creditC, creditC.StopLoss.GetValueOrDefault(), credit.Symbol) >= 0.10 - 1e-9,
+                    "S18: الصافي مع السواب الدائن ≥ 0.10");
+
+                WriteLog(opts, "scenario_S18_commission_sign_swap.log", positive.Bot);
+                summary.Add($"S18 sign/swap: pos={posBp.StopLoss}, neg={posBn.StopLoss}, " +
+                            $"swapDebitC={debitC.StopLoss}, swapCreditC={creditC.StopLoss}");
+            }
+
+            // === S19: الانتشار لا يُضاف مرتين ======================================
+            {
+                var narrow = new ExecSettings
+                {
+                    Action = "buy",
+                    SizeUsd = 20.0,
+                    AtrTarget = 10.0 / 9.0,
+                    CommissionPerPosition = 0.05,
+                };
+                var wide = new ExecSettings
+                {
+                    Action = "buy",
+                    SizeUsd = 20.0,
+                    AtrTarget = 10.0 / 9.0,
+                    CommissionPerPosition = 0.05,
+                };
+                wide.Spec.Bid = 1999.8; // انتشار 0.30 بدل 0.10 — نفس Ask/الدخول
+
+                var fxNarrow = BuildExecFixture(narrow);
+                var fxWide = BuildExecFixture(wide);
+                fxNarrow.Bot.TestStart();
+                fxWide.Bot.TestStart();
+                RaiseBar(fxNarrow);
+                RaiseBar(fxWide);
+
+                MoveMarketToA(fxNarrow, TradeType.Buy);
+                MoveMarketToA(fxWide, TradeType.Buy);
+                // نُبقي Ask (سعر الدخول المرجعي) ونوسّع Bid فقط في اللحظة التي تُحسب فيها
+                // الحماية، كي يكون فرق الانتشار فعلياً وقت الحساب لا قبل فتح المراكز.
+                fxWide.Symbol.Bid = fxWide.Symbol.Ask - 0.30;
+                Check(Math.Abs((fxWide.Symbol.Ask - fxWide.Symbol.Bid) -
+                               (fxNarrow.Symbol.Ask - fxNarrow.Symbol.Bid)) > 0.1,
+                    "S19: الانتشاران مختلفان فعلاً وقت حساب الحماية");
+
+                fxNarrow.Positions.CloseForTest(PositionByRole(fxNarrow, "A"), netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
+                fxWide.Positions.CloseForTest(PositionByRole(fxWide, "A"), netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
+
+                var bNarrow = PositionByRole(fxNarrow, "B");
+                var bWide = PositionByRole(fxWide, "B");
+                Check(Math.Abs(bNarrow.EntryPrice - bWide.EntryPrice) < 1e-9,
+                    "S19: سعر دخول الشراء متطابق (Ask نفسه)");
+                Check(Math.Abs(bNarrow.StopLoss.GetValueOrDefault() - bWide.StopLoss.GetValueOrDefault()) < 1e-9,
+                    $"S19: انتشار مختلف لا يغيّر الوقف (ضيق={bNarrow.StopLoss}، واسع={bWide.StopLoss}) ⇒ لا ازدواج للانتشار");
+                Check(EstimatedNetAt(bNarrow, bNarrow.StopLoss.GetValueOrDefault(), fxNarrow.Symbol) >= 0.10 - 1e-9,
+                    "S19: الصافي ≥ 0.10 دون إضافة انتشار");
+
+                WriteLog(opts, "scenario_S19_spread_not_double_counted.log", fxNarrow.Bot);
+                summary.Add($"S19 spread: SL narrow={bNarrow.StopLoss}, wide={bWide.StopLoss}");
+            }
+
+            // === S20: الحد الأدنى لمسافة الوقف — لا تخفيض للهدف ====================
+            {
+                // (أ) حد أدنى صغير: لا يمنع وقفاً أبعد منه.
+                var okSettings = new ExecSettings
+                {
+                    Action = "buy",
+                    SizeUsd = 20.0,
+                    AtrTarget = 10.0 / 9.0,
+                    CommissionPerPosition = 0.05,
+                };
+                okSettings.Spec.MinStopLossDistance = 1.0; // 1 pip = 0.1 سعر
+                var ok = BuildExecFixture(okSettings);
+                ok.Bot.TestStart();
+                RaiseBar(ok);
+                MoveMarketToA(ok, TradeType.Buy);
+                ok.Positions.CloseForTest(PositionByRole(ok, "A"), netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
+                Check(ok.Bot.ModifyCalls.Count == 2,
+                    $"S20: حد أدنى 1 pip لا يمنع وقفاً أبعد منه (الفعلي={ok.Bot.ModifyCalls.Count})");
+                Check(Math.Abs(PositionByRole(ok, "B").StopLoss.GetValueOrDefault() - 2000.15) < 1e-9,
+                    $"S20: الوقف بقي 2000.15 مع حد أدنى صغير (الفعلي={PositionByRole(ok, "B").StopLoss})");
+                WriteLog(opts, "scenario_S20a_min_stop_distance_ok.log", ok.Bot);
+
+                // (ب) حد أدنى أكبر من المسافة المطلوبة: لا تعديل ولا خفض للهدف.
+                var s = new ExecSettings
+                {
+                    Action = "buy",
+                    SizeUsd = 20.0,
+                    AtrTarget = 10.0 / 9.0,
+                    CommissionPerPosition = 0.05,
+                };
+                s.Spec.MinStopLossDistance = 100.0; // 100 pip = 10.0 سعر
+                var fx = BuildExecFixture(s);
+                fx.Bot.TestStart();
+                RaiseBar(fx);
+
+                var posA = PositionByRole(fx, "A");
+                var posB = PositionByRole(fx, "B");
+                var posC = PositionByRole(fx, "C");
+                var slB = posB.StopLoss;
+                var slC = posC.StopLoss;
+
+                MoveMarketToA(fx, TradeType.Buy);
+                fx.Positions.CloseForTest(posA, netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
+
+                Check(fx.Bot.ModifyCalls.Count == 0,
+                    $"S20: لم يُرسل وقف أقرب من الحد الأدنى (الفعلي={fx.Bot.ModifyCalls.Count})");
+                Check(posB.StopLoss == slB && posC.StopLoss == slC, "S20: الوقفان الأصليان بقيا كما هما");
+                Check(Contains(fx.Bot, "أقرب إلى السوق من الحد الأدنى"), "S20: سُجِّل سبب رفض الحد الأدنى");
+                Check(!Contains(fx.Bot, "✅ المركز B") && !Contains(fx.Bot, "✅ المركز C"),
+                    "S20: لا ادعاء بنجاح الحماية");
+                Check(Contains(fx.Bot, "لم تكتمل الحماية"), "S20: سُجِّل فشل الحماية بوضوح");
+
+                WriteLog(opts, "scenario_S20_min_stop_distance.log", fx.Bot);
+                summary.Add("S20 min-stop-distance: no modify, original SL kept, target not lowered");
+            }
+
+            // === S21: مرجع الهدف غير متاح/غير صالح ⇒ لا تعديل ولا صيغة قديمة ======
+            {
+                var s = new ExecSettings
+                {
+                    Action = "buy",
+                    SizeUsd = 20.0,
+                    AtrTarget = 10.0 / 9.0,
+                    CommissionPerPosition = 0.05,
+                };
+
+                // (أ) C أُغلق قبل A: لا مرجع لربح C المتوقع.
+                var fx = BuildExecFixture(s);
+                fx.Bot.TestStart();
+                RaiseBar(fx);
+
+                var posA = PositionByRole(fx, "A");
+                var posB = PositionByRole(fx, "B");
+                var posC = PositionByRole(fx, "C");
+                var slB = posB.StopLoss;
+
+                fx.Positions.CloseForTest(posC, netProfit: 2.5, reason: PositionCloseReason.TakeProfit);
+                Check(fx.Bot.ModifyCalls.Count == 0, "S21a: إغلاق C لا يفعّل الحماية (ليس A)");
+
+                MoveMarketToA(fx, TradeType.Buy);
+                fx.Positions.CloseForTest(posA, netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
+                Check(fx.Bot.ModifyCalls.Count == 0, "S21a: لا تعديل عند تعذّر مرجع C");
+                Check(posB.StopLoss == slB, "S21a: وقف B الأصلي بقي (لا تعادل ولا صيغة قديمة)");
+                Check(Contains(fx.Bot, "تعذّر حساب هدف الحماية الصافي") && Contains(fx.Bot, "غير مفتوح"),
+                    "S21a: سُجِّل سبب تعذّر الهدف بوضوح");
+                Check(Contains(fx.Bot, "لا يوجد بديل"), "S21a: سُجِّل رفض البديل القديم");
+                WriteLog(opts, "scenario_S21a_target_unavailable.log", fx.Bot);
+
+                // (ب) C بلا هدف ربح على الخادم.
+                var noTp = BuildExecFixture(s);
+                noTp.Bot.TestStart();
+                RaiseBar(noTp);
+                var noTpA = PositionByRole(noTp, "A");
+                var noTpB = PositionByRole(noTp, "B");
+                var noTpC = PositionByRole(noTp, "C");
+                noTpC.TakeProfit = null;
+                var noTpSlB = noTpB.StopLoss;
+                MoveMarketToA(noTp, TradeType.Buy);
+                noTp.Positions.CloseForTest(noTpA, netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
+                Check(noTp.Bot.ModifyCalls.Count == 0, "S21b: لا تعديل بلا هدف C");
+                Check(noTpB.StopLoss == noTpSlB, "S21b: وقف B بقي أصلياً");
+                Check(Contains(noTp.Bot, "بلا هدف ربح"), "S21b: سُجِّل غياب هدف C");
+                WriteLog(opts, "scenario_S21b_c_missing_tp.log", noTp.Bot);
+
+                // (ج) مدخلات نقدية غير صالحة (حجم C = 0).
+                var bad = BuildExecFixture(s);
+                bad.Bot.TestStart();
+                RaiseBar(bad);
+                var badA = PositionByRole(bad, "A");
+                var badB = PositionByRole(bad, "B");
+                var badC = PositionByRole(bad, "C");
+                badC.VolumeInUnits = 0.0;
+                var badSlB = badB.StopLoss;
+                MoveMarketToA(bad, TradeType.Buy);
+                bad.Positions.CloseForTest(badA, netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
+                Check(bad.Bot.ModifyCalls.Count == 0, "S21c: لا تعديل بمدخلات غير صالحة");
+                Check(badB.StopLoss == badSlB, "S21c: وقف B بقي أصلياً");
+                Check(Contains(bad.Bot, "حجم Position C غير صالح"), "S21c: سُجِّل المدخل غير الصالح");
+                WriteLog(opts, "scenario_S21c_invalid_inputs.log", bad.Bot);
+
+                summary.Add("S21 target-unavailable/invalid: no modify, no old-formula fallback");
             }
 
             // ---------------------------------------------------------------------------

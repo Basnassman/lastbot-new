@@ -556,6 +556,13 @@ namespace cAlgo.API.Internals
     /// شيم لـ Symbol مع خصائص ومواصفات الرمز والتحويلات — نفس الأسماء الموثّقة.
     /// القيم الافتراضية هنا للاختبار فقط؛ الـcBot يقرؤها من المنصة الحقيقية.
     /// </summary>
+    // موثّق: SymbolMinDistanceType { Pips, Percentage } — يُفسّر Symbol.MinStopLossDistance.
+    public enum SymbolMinDistanceType
+    {
+        Pips = 0,
+        Percentage = 1,
+    }
+
     public class Symbol
     {
         public string Name { get; set; }
@@ -564,6 +571,9 @@ namespace cAlgo.API.Internals
         public double PipValue { get; set; } = 0.01;
         public double TickSize { get; set; } = 0.01;
         public double TickValue { get; set; } = 0.01;
+        // موثّق: Gets symbol minimum stop loss distance. Use MinDistanceType for interpretation.
+        public double MinStopLossDistance { get; set; } = 0.0;
+        public SymbolMinDistanceType MinDistanceType { get; set; } = SymbolMinDistanceType.Pips;
         public double LotSize { get; set; } = 100000.0;
         public double Bid { get; set; } = 2000.0;
         public double Ask { get; set; } = 2000.1;

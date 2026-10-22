@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("cAlgo.API")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+06cf935d4efeda5148b0e1c7ca73f8d5a781c2c3")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+b6ba4a54fbc114e623603af2c4715b6f02a82ede")]
 [assembly: System.Reflection.AssemblyProductAttribute("cAlgo.API")]
 [assembly: System.Reflection.AssemblyTitleAttribute("cAlgo.API")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
