@@ -131,6 +131,18 @@ namespace cAlgo.API
 
     // ---- عناصر HTTP الموثّقة (Http / HttpRequest) ----
 
+    // cAlgo.API.HttpMethod — enum موثّق (help.ctrader.com/ctrader-algo/guides/network-access):
+    // "set the HttpRequest.Method property to one of the values of the HttpMethod enum
+    //  such as HttpMethod.Put or HttpMethod.Patch". الـcBot يستخدم cAlgo.API.HttpMethod.Post.
+    public enum HttpMethod
+    {
+        Get,
+        Post,
+        Put,
+        Patch,
+        Delete,
+    }
+
     public sealed class HttpRequest
     {
         public HttpRequest(Uri uri)
@@ -198,6 +210,23 @@ namespace cAlgo.API
             }
         }
 
+        private static System.Net.Http.HttpMethod ToTransportMethod(HttpMethod method)
+        {
+            switch (method)
+            {
+                case HttpMethod.Post:
+                    return System.Net.Http.HttpMethod.Post;
+                case HttpMethod.Put:
+                    return System.Net.Http.HttpMethod.Put;
+                case HttpMethod.Patch:
+                    return System.Net.Http.HttpMethod.Patch;
+                case HttpMethod.Delete:
+                    return System.Net.Http.HttpMethod.Delete;
+                default:
+                    return System.Net.Http.HttpMethod.Get;
+            }
+        }
+
         private static HttpResponse DefaultSend(HttpRequest request)
         {
             try
@@ -205,7 +234,7 @@ namespace cAlgo.API
                 using (var client = new System.Net.Http.HttpClient())
                 {
                     client.Timeout = request.Timeout;
-                    var message = new System.Net.Http.HttpRequestMessage(request.Method, request.Uri);
+                    var message = new System.Net.Http.HttpRequestMessage(ToTransportMethod(request.Method), request.Uri);
                     if (!string.IsNullOrEmpty(request.Body))
                     {
                         message.Content = new System.Net.Http.StringContent(request.Body);
@@ -334,6 +363,15 @@ namespace cAlgo.API
         Down,
     }
 
+    // cAlgo.API.ProtectionType — موثّق (help.ctrader.com/ctrader-algo/references/Trading/ProtectionType):
+    // None=0، Relative=1 (مسافات/نقاط)، Absolute=2 (أسعار مطلقة).
+    public enum ProtectionType
+    {
+        None = 0,
+        Relative = 1,
+        Absolute = 2,
+    }
+
     public enum ErrorCode
     {
         TechnicalError,
@@ -370,6 +408,10 @@ namespace cAlgo.API
         public string Comment { get; set; }
         public bool HasTrailingStop { get; set; }
         public double Quantity { get; set; }
+        // ملكيتان موثّقتان في cAlgo.API.Position — تُستخدمان لحساب التعادل الصافي بعد التكاليف.
+        // Commissions: "Commission Amount of the request to trade one way (Buy/Sell)".
+        public double Commissions { get; set; }
+        public double Swap { get; set; }
     }
 
     public class TradeResult
@@ -467,6 +509,12 @@ namespace cAlgo.API
         public Position FindById(int id)
         {
             return _items.Find(p => p.Id == id);
+        }
+
+        // ---- مُشغِّل للاختبار فقط: إزالة مركز دون إطلاق حدث الإغلاق ----
+        public void RemoveForTest(Position position)
+        {
+            _items.Remove(position);
         }
 
         // ---- مُشغِّلات للاختبار فقط (لا وجود لها في cAlgo.API الحقيقي) ----
@@ -705,6 +753,68 @@ namespace cAlgo.API.Internals
         }
 
         private int _nextPositionId = 100000;
+
+        // ---- شيم لـ Robot.ModifyPosition (النسخة غير المهجورة مع ProtectionType) ----
+        // موثّق: ModifyPosition(Position, double? stopLoss, double? takeProfit, ProtectionType?)
+        // مع ProtectionType.Absolute الأسعار مطلقة، ومع Relative مسافات (نقاط).
+        public Func<Position, double?, double?, ProtectionType?, TradeResult> ModifyExecutor { get; set; }
+
+        private readonly List<ModifyCall> _modifyCalls = new List<ModifyCall>();
+
+        public IReadOnlyList<ModifyCall> ModifyCalls => _modifyCalls;
+
+        public TradeResult ModifyPosition(
+            Position position,
+            double? stopLoss,
+            double? takeProfit,
+            ProtectionType? protectionType)
+        {
+            if (position == null)
+            {
+                return new TradeResult { IsSuccessful = false, Error = ErrorCode.EntityNotFound, Description = "position is null" };
+            }
+
+            _modifyCalls.Add(new ModifyCall
+            {
+                PositionId = position.Id,
+                StopLoss = stopLoss,
+                TakeProfit = takeProfit,
+                ProtectionType = protectionType,
+            });
+
+            if (ModifyExecutor != null)
+            {
+                return ModifyExecutor(position, stopLoss, takeProfit, protectionType);
+            }
+
+            var type = protectionType ?? ProtectionType.Relative;
+            var pipSize = Symbol != null && Symbol.PipSize > 0 ? Symbol.PipSize : 0.01;
+
+            if (stopLoss.HasValue)
+            {
+                position.StopLoss = type == ProtectionType.Absolute
+                    ? stopLoss.Value
+                    : position.EntryPrice + (position.TradeType == TradeType.Buy ? -1 : 1) * stopLoss.Value * pipSize;
+            }
+
+            if (takeProfit.HasValue)
+            {
+                position.TakeProfit = type == ProtectionType.Absolute
+                    ? takeProfit.Value
+                    : position.EntryPrice + (position.TradeType == TradeType.Buy ? 1 : -1) * takeProfit.Value * pipSize;
+            }
+
+            return new TradeResult { IsSuccessful = true, Position = position, Description = "Position modified" };
+        }
+
+        // ---- سجل تعديلات المركز (للتحقق في الـharness فقط) ----
+        public sealed class ModifyCall
+        {
+            public int PositionId { get; set; }
+            public double? StopLoss { get; set; }
+            public double? TakeProfit { get; set; }
+            public ProtectionType? ProtectionType { get; set; }
+        }
 
         private void Emit(string line)
         {

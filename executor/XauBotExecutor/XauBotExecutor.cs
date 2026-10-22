@@ -24,6 +24,18 @@
 //   6) عند إغلاق أي مركز: POST /trade-result بالربح/الخسارة الفعلية (NetProfit).
 //   7) منع التكرار: وقت الشمعة نفسه مفتاح منع تكرار للأمر.
 //
+//  تقسيم الصفقة وحماية الأرباح (الميزة المعتمدة — بعد الطبقات 0..7):
+//   أ) القرار الأصلي محفوظ كما هو: الاتجاه، الثقة، إجمالي الحجم، مسافة SL الأصلية،
+//      ومسافة TP الأصلية (100%). لا يُعاد حساب أي منها هنا.
+//   ب) يُقسَّم إجمالي الحجم إلى ثلاثة مراكز مستقلة (Hedged فقط) بأهداف:
+//      A = 20% و B = 50% و C = 100% من مسافة TP الأصلية. مجموع الأحجام = الإجمالي
+//      بالضبط بعد تطبيع خطوة الحجم، وبلا تقريب أو حذف أو تجاوز.
+//   ج) بعد تأكيد إغلاق Position A عند هدفه (حدث Positions.Closed + السبب=TakeProfit)
+//      يُنقل وقف B و C إلى التعادل الصافي بعد التكاليف (عمولات + سواب؛ الانتشار محتسب
+//      في سعر الدخول) مع الحفاظ على هدفيهما. لا يُرخّى أي وقف قائم أبداً.
+//   د) كل التعديلات مقيّدة بمعرّفات الخادم (Position.Id) والوسم، وليست بالتعليق.
+//      التكرار والمحاولات المرفوضة وإعادة التشغيل تُسجَّل ولا تُنتج أوامر مكرّرة.
+//
 //  ⚠️ حساب Demo فقط. الفحص Account.IsLive=true يوقف الـcBot فوراً ولا يمكن تجاوزه.
 //  أخطاء الشبكة تُسجَّل بوضوح ولا تُسقط الـcBot.
 //
@@ -53,6 +65,20 @@ namespace cAlgo.Robots
         // وسم (Label) أوامر هذا الـcBot — يُستخدم لتحديد "مراكز هذا الـcBot" على الحساب
         // الفعلي (يبقى محفوظاً على الخادم فيصمد بعد إعادة التشغيل، بخلاف متغير داخلي).
         private const string OrderLabel = "XauBotExecutor";
+
+        // أدوار المراكز الثلاثة في مجموعة واحدة، ضمن وسم المركز نفسه: Label = OrderLabel-token-role
+        // الوسم محفوظ على الخادم فلا يعتمد الربط على نص التعليق (comment) ولا على الرمز فقط.
+        // الفاصل '-' آمن في وسوم/تعليقات الوسيط (لا رموز خاصة).
+        private const char LabelSeparator = '-';
+
+        private const string RoleA = "A";
+        private const string RoleB = "B";
+        private const string RoleC = "C";
+
+        // نسب هدف الربح من مسافة TP الأصلية (لا تُعاد المسافة الأصلية نفسها أبداً).
+        private const double TargetFractionA = 0.20;
+        private const double TargetFractionB = 0.50;
+        private const double TargetFractionC = 1.00;
 
         // ---------------------------------------------------------------------------
         // Parameters: كل ما هو قابل للتعديل يُعرَّف هنا. لا يوجد Host/Port مكتوب يدوياً
@@ -122,6 +148,32 @@ namespace cAlgo.Robots
         // الطبقة 7: وقت شمعة آخر أمر أُرسل (نجح أو فشل) — مفتاح منع التكرار.
         private DateTime? _lastExecutionBarTimeUtc;
 
+        // مجموعة (3 مراكز) لكل قرار تنفيذي — تُستعاد من المراكز المفتوحة عند إعادة التشغيل.
+        private sealed class TradeGroup
+        {
+            public string Token;
+            public TradeType TradeType;
+            public int IdA;
+            public int IdB;
+            public int IdC;
+            public bool ProtectionDone;
+            public bool ProtectionFailed;
+            public DateTime CreatedUtc;
+        }
+
+        private readonly List<TradeGroup> _groups = new List<TradeGroup>();
+
+        // معرّفات المراكز التي عولج إغلاقها — يمنع تطبيق الحماية مرتين عند تكرار الأحداث.
+        private readonly HashSet<int> _processedClosures = new HashSet<int>();
+
+        private enum ProtectionOutcome
+        {
+            Applied,
+            AlreadyProtected,
+            NotOpen,
+            Failed,
+        }
+
         // ===========================================================================
         //  دورة الحياة
         // ===========================================================================
@@ -131,6 +183,8 @@ namespace cAlgo.Robots
             _successCount = 0;
             _failureCount = 0;
             _lastExecutionBarTimeUtc = null;
+            _groups.Clear();
+            _processedClosures.Clear();
 
             Print($"{LogPrefix} =================================================================");
             Print($"{LogPrefix} بدء تشغيل XauBotExecutor.");
@@ -208,6 +262,20 @@ namespace cAlgo.Robots
             catch (Exception ex)
             {
                 Print($"{LogPrefix} ⚠️ تعذّر الاشتراك في حدث إغلاق المراكز: {ex.Message}");
+            }
+
+            // -----------------------------------------------------------------------
+            // إعادة التشغيل: استعادة مجموعات المراكز المفتوحة من الوسوم المحفوظة على الخادم.
+            // لا تُفتح أي أوامر هنا ولا تُعدّل أي أوقاف — قراءة واستعادة حالة فقط.
+            // -----------------------------------------------------------------------
+            try
+            {
+                AdoptExistingGroups();
+            }
+            catch (Exception ex)
+            {
+                Print($"{LogPrefix} ⚠️ تعذّرت استعادة المراكز المفتوحة بعد إعادة التشغيل: " +
+                      $"{ex.GetType().Name}: {ex.Message}");
             }
 
             _guardPassed = true;
@@ -449,11 +517,18 @@ namespace cAlgo.Robots
             // --- الطبقة 1.5: لا مركز مفتوح مسبقاً على الرمز من هذا الـcBot ----------
             //     يُفحَص من Positions الفعلية على الحساب (لا من متغير داخلي) — يصمد
             //     بعد إعادة التشغيل لأن الوسم (Label) محفوظ على الخادم.
-            var openPositions = Positions != null ? Positions.FindAll(OrderLabel, _resolvedSymbolName) : null;
-            if (openPositions != null && openPositions.Length > 0)
+            //     بعد التقسيم: أيٌّ من مراكز المجموعة (A/B/C) يمنع قراراً جديداً.
+            var openPositions = GetBotOwnedPositions();
+            if (openPositions.Count > 0)
             {
+                var ids = new List<string>();
+                foreach (var openPosition in openPositions)
+                {
+                    ids.Add("#" + openPosition.Id);
+                }
+
                 Print($"{LogPrefix} [تنفيذ] مرفوض: يوجد مركز مفتوح مسبقاً على {_resolvedSymbolName} " +
-                      $"(Id={openPositions[0].Id}). منع فتح صفقة ثانية فوق صفقة قائمة.");
+                      $"(Ids={string.Join(", ", ids.ToArray())}). منع فتح صفقة ثانية فوق صفقة قائمة.");
                 return;
             }
 
@@ -567,56 +642,821 @@ namespace cAlgo.Robots
             }
             volume = normalizedVolume;
 
-            // --- الطبقة 5: إرسال أمر سوقي مع SL/TP في نفس الاستدعاء ----------------
+            // --- الطبقة 5: إرسال ثلاثة أوامر سوقية (كل منها SL/TP في نفس الاستدعاء) ---
             var tradeType = isBuy ? TradeType.Buy : TradeType.Sell;
-            var comment = $"XauBot {action}";
             var intendedRiskUsd = volume * slPips * pipValuePerUnit;
 
-            Print($"{LogPrefix} [تنفيذ] إرسال أمر {action.ToUpperInvariant()}: volume={Fmt(volume)} وحدة | " +
-                  $"SL={Fmt(slPips)} pips | TP={Fmt(tpPips)} pips | RR={Fmt(RiskRewardRatio)} | " +
+            Print($"{LogPrefix} [تنفيذ] إجمالي القرار {action.ToUpperInvariant()}: volume={Fmt(volume)} وحدة | " +
+                  $"SL={Fmt(slPips)} pips (بلا تغيير) | TP الأصلي={Fmt(tpPips)} pips (100%) | RR={Fmt(RiskRewardRatio)} | " +
                   $"المخاطرة المقصودة≈${Fmt(intendedRiskUsd)} (القيمة من Brain=${Fmt(sizeUsd)}، السقف=${Fmt(MaxPositionSizeUsd)})");
             Print($"{LogPrefix} [تنفيذ] ATR={Fmt(atr)} | مضاعف SL={Fmt(StopLossAtrMultiplier)} | PipSize={Fmt(symbol.PipSize)} | PipValue/وحدة={Fmt(pipValuePerUnit)}");
 
             // نعلّم الشمعة قبل الإرسال: أي فشل لا يُعاد تلقائياً بنفس الشمعة (الطبقة 5 و7).
             _lastExecutionBarTimeUtc = barTime;
 
+            PlaceSplitOrders(tradeType, action, volume, slPips, tpPips, barTime);
+        }
+
+        // ===========================================================================
+        //  تقسيم القرار إلى ثلاثة مراكز مستقلة (A=20%، B=50%، C=100% من مسافة TP)
+        // ---------------------------------------------------------------------------
+        //  الاتجاه وإجمالي الحجم ومسافة SL ومسافة TP الأصلية تُمرَّر كما حُسبت أعلاه بلا
+        //  أي تعديل. التقسيم يوزّع *الحجم نفسه* فقط، ويستعمل نفس اصطلاح pips القائم.
+        // ===========================================================================
+        private void PlaceSplitOrders(
+            TradeType tradeType,
+            string action,
+            double totalVolume,
+            double slPips,
+            double tpPips,
+            DateTime barTime)
+        {
+            var symbol = _targetSymbol;
+
+            // التقسيم إلى ثلاثة مراكز مستقلة متاح على الحساب Hedged فقط؛ على Netted تدمج
+            // المنصة المراكز في مركز واحد فلا معنى للتقسيم ولا لحماية مستقلة.
+            if (Account.AccountType != AccountType.Hedged)
+            {
+                Print($"{LogPrefix} [تقسيم] ❌ رفض التنفيذ: نوع الحساب {Account.AccountType} وليس Hedged — " +
+                      $"لا يمكن فتح ثلاثة مراكز مستقلة على الرمز نفسه. لم يُرسل أي أمر.");
+                Print($"{LogPrefix} [تقسيم] البدائل المطلوبة من مالك المشروع: (1) حساب Hedged، " +
+                      $"(2) أمر واحد بلا تقسيم (يتطلب موافقة صريحة على تغيير السلوك).");
+                return;
+            }
+
+            double[] childVolumes;
+            string splitError;
+            if (!TryPlanVolumeSplit(totalVolume, symbol.VolumeInUnitsStep, symbol.VolumeInUnitsMin,
+                    symbol.VolumeInUnitsMax, out childVolumes, out splitError))
+            {
+                Print($"{LogPrefix} [تقسيم] ❌ رفض التنفيذ: {splitError}. لم يُرسل أي أمر (لا تقريب ولا حذف حجم).");
+                Print($"{LogPrefix} [تقسيم] القيود الفعلية للرمز {symbol.Name}: الإجمالي={Fmt(totalVolume)} | " +
+                      $"Min={Fmt(symbol.VolumeInUnitsMin)} | Step={Fmt(symbol.VolumeInUnitsStep)} | Max={Fmt(symbol.VolumeInUnitsMax)}.");
+                Print($"{LogPrefix} [تقسيم] البدائل المطلوبة من مالك المشروع: " +
+                      $"(1) زيادة الحجم الإجمالي (رصيد/مخاطرة أكبر أو وقف خسارة أقصر)، " +
+                      $"(2) وسيط بحد أدنى/خطوة أصغر، (3) أمر واحد غير مقسوم (يخالف لزوم التقسيم).");
+                return;
+            }
+
+            var token = barTime.ToString("yyyyMMddHHmm", CultureInfo.InvariantCulture);
+            Print($"{LogPrefix} [تقسيم] خطة المجموعة {token}: الإجمالي={Fmt(totalVolume)} | " +
+                  $"A(20%)={Fmt(childVolumes[0])} | B(50%)={Fmt(childVolumes[1])} | C(100%)={Fmt(childVolumes[2])} | " +
+                  $"المجموع={Fmt(childVolumes[0] + childVolumes[1] + childVolumes[2])}");
+
+            var roles = new[] { RoleA, RoleB, RoleC };
+            var fractions = new[] { TargetFractionA, TargetFractionB, TargetFractionC };
+
+            var group = new TradeGroup
+            {
+                Token = token,
+                TradeType = tradeType,
+                CreatedUtc = TimeInUtc,
+            };
+
+            var placed = 0;
+            var actualTotalVolume = 0.0;
+            var failureReason = (string)null;
+
+            for (var i = 0; i < roles.Length; i++)
+            {
+                var role = roles[i];
+                var label = BuildChildLabel(token, role);
+                var childTpPips = tpPips * fractions[i];
+                var comment = $"XauBot {action} {role}";
+
+                Print($"{LogPrefix} [تقسيم] إرسال {role}: volume={Fmt(childVolumes[i])} | " +
+                      $"SL={Fmt(slPips)} pips | TP={Fmt(childTpPips)} pips ({Fmt(fractions[i] * 100.0)}%) | label={label}");
+
+                TradeResult result;
+                try
+                {
+                    result = ExecuteMarketOrder(tradeType, _resolvedSymbolName, childVolumes[i], label,
+                        slPips, childTpPips, comment, false);
+                }
+                catch (Exception ex)
+                {
+                    failureReason = $"استثناء أثناء الإرسال: {ex.GetType().Name}: {ex.Message}";
+                    Print($"{LogPrefix} [تقسيم] ❌ فشل فتح المركز {role}: {failureReason}");
+                    break;
+                }
+
+                if (result == null)
+                {
+                    failureReason = "لم تُرجِع المنصة أي TradeResult";
+                    Print($"{LogPrefix} [تقسيم] ❌ فشل فتح المركز {role}: {failureReason}");
+                    break;
+                }
+
+                if (!result.IsSuccessful)
+                {
+                    failureReason = $"Error={result.Error?.ToString() ?? "—"} | {result}";
+                    Print($"{LogPrefix} [تقسيم] ❌ فشل فتح المركز {role}: فشل تنفيذ الأمر من المنصة — {failureReason}");
+                    break;
+                }
+
+                var position = result.Position;
+                if (position == null)
+                {
+                    failureReason = "TradeResult ناجح لكن بلا Position";
+                    Print($"{LogPrefix} [تقسيم] ❌ فشل فتح المركز {role}: {failureReason}");
+                    break;
+                }
+
+                if (role == RoleA) group.IdA = position.Id;
+                else if (role == RoleB) group.IdB = position.Id;
+                else group.IdC = position.Id;
+
+                placed++;
+                actualTotalVolume += position.VolumeInUnits;
+
+                Print($"{LogPrefix} [تقسيم] ✅ فُتح المركز {role} #{position.Id} على {position.SymbolName}: " +
+                      $"الحجم الفعلي={Fmt(position.VolumeInUnits)} | سعر التنفيذ={Fmt(position.EntryPrice)} | " +
+                      $"SL الفعلي={FmtNullable(position.StopLoss)} | TP الفعلي={FmtNullable(position.TakeProfit)} | " +
+                      $"وقت الشمعة={barTime:yyyy-MM-dd HH:mm} UTC");
+            }
+
+            if (placed < 3)
+            {
+                Print($"{LogPrefix} [تقسيم] ⚠️ حالة جزئية: أُرسل {placed}/3 أوامر " +
+                      $"(A=#{group.IdA}، B=#{group.IdB}، C=#{group.IdC}). السبب: {failureReason ?? "—"}.");
+                Print($"{LogPrefix} [تقسيم] لن تُفتح أي أوامر بديلة ولن تُغلق المراكز المفتوحة تلقائياً. " +
+                      $"المراكز المفتوحة تحتفظ بوقف الخسارة الأصلي كاملاً.");
+            }
+            else if (Math.Abs(actualTotalVolume - totalVolume) > 1e-6)
+            {
+                Print($"{LogPrefix} [تقسيم] ⚠️ الحجم الفعلي المنفَّذ ({Fmt(actualTotalVolume)}) لا يساوي الحجم " +
+                      $"المطلوب ({Fmt(totalVolume)}) — قد يكون هناك تنفيذ جزئي على الخادم. لن يُفتح أي أمر تعويضي.");
+            }
+            else
+            {
+                Print($"{LogPrefix} [تقسيم] ✅ اكتمل التقسيم: 3 مراكز | مجموع الحجم={Fmt(actualTotalVolume)} = الإجمالي المطلوب.");
+            }
+
+            RememberGroup(group);
+        }
+
+        // ===========================================================================
+        //  توزيع الحجم: B و C متساويان (base) والباقي إلى A — في حدود خطوة الوسيط.
+        //  يُعاد false عند أي استحالة، بلا تقريب أو حذف أو تجاوز للحجم الأصلي.
+        // ===========================================================================
+        private static bool TryPlanVolumeSplit(
+            double totalVolume,
+            double step,
+            double minVolume,
+            double maxVolume,
+            out double[] childVolumes,
+            out string errorReason)
+        {
+            childVolumes = null;
+            errorReason = null;
+
+            if (step <= 0 || minVolume <= 0 || maxVolume < minVolume)
+            {
+                errorReason = $"خطوة/حدود الحجم غير صالحة (Min={minVolume}, Step={step}, Max={maxVolume})";
+                return false;
+            }
+
+            var exactSteps = totalVolume / step;
+            var totalSteps = (long)Math.Round(exactSteps);
+            if (Math.Abs(exactSteps - totalSteps) > 1e-6)
+            {
+                errorReason = $"إجمالي الحجم ({totalVolume}) ليس من مضاعفات خطوة الحجم ({step})";
+                return false;
+            }
+
+            if (totalSteps < 3)
+            {
+                errorReason = $"إجمالي الحجم ({totalVolume}) أقل من ثلاث خطوات ({step}) — لا يمكن تكوين ثلاثة مراكز صالحة";
+                return false;
+            }
+
+            var baseSteps = totalSteps / 3;
+            var remainder = totalSteps % 3;
+
+            // B و C متساويان دائماً (baseSteps)، والباقي كله إلى A (20%).
+            var steps = new[] { baseSteps + remainder, baseSteps, baseSteps };
+            var roles = new[] { RoleA, RoleB, RoleC };
+            var planned = new double[3];
+
+            for (var i = 0; i < 3; i++)
+            {
+                var volume = steps[i] * step;
+                if (volume + 1e-9 < minVolume)
+                {
+                    errorReason = $"المركز {roles[i]} سيحصل على {volume} وهو أقل من الحد الأدنى {minVolume}";
+                    return false;
+                }
+
+                if (volume - 1e-9 > maxVolume)
+                {
+                    errorReason = $"المركز {roles[i]} سيحصل على {volume} وهو أكبر من الحد الأقصى {maxVolume}";
+                    return false;
+                }
+
+                planned[i] = volume;
+            }
+
+            var sum = planned[0] + planned[1] + planned[2];
+            if (Math.Abs(sum - totalVolume) > 1e-9)
+            {
+                errorReason = $"مجموع الأحجام ({sum}) لا يساوي الإجمالي ({totalVolume})";
+                return false;
+            }
+
+            childVolumes = planned;
+            return true;
+        }
+
+        // ===========================================================================
+        //  وسوم المراكز والربط بمجموعة القرار
+        // ===========================================================================
+        private static bool IsBotOwnedLabel(string label)
+        {
+            if (string.IsNullOrEmpty(label))
+            {
+                return false;
+            }
+
+            return string.Equals(label, OrderLabel, StringComparison.Ordinal) ||
+                   label.StartsWith(OrderLabel + LabelSeparator, StringComparison.Ordinal);
+        }
+
+        private static string BuildChildLabel(string token, string role)
+        {
+            return $"{OrderLabel}{LabelSeparator}{token}{LabelSeparator}{role}";
+        }
+
+        // وسم المركز = OrderLabel:token:role — يُحلّل من الخادم بعد إعادة التشغيل أيضاً.
+        private static bool TryParseChildLabel(string label, out string token, out string role)
+        {
+            token = null;
+            role = null;
+
+            if (!IsBotOwnedLabel(label) || string.Equals(label, OrderLabel, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var parts = label.Split(LabelSeparator);
+            if (parts.Length != 3 || parts[1].Length == 0)
+            {
+                return false;
+            }
+
+            if (parts[2] != RoleA && parts[2] != RoleB && parts[2] != RoleC)
+            {
+                return false;
+            }
+
+            token = parts[1];
+            role = parts[2];
+            return true;
+        }
+
+        // كل مراكز هذا الـcBot المفتوحة على الرمز المستهدف (أي دور في أي مجموعة).
+        private List<Position> GetBotOwnedPositions()
+        {
+            var result = new List<Position>();
+            if (Positions == null)
+            {
+                return result;
+            }
+
+            foreach (var position in Positions)
+            {
+                if (position == null)
+                {
+                    continue;
+                }
+
+                if (!string.Equals(position.SymbolName, _resolvedSymbolName, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (!IsBotOwnedLabel(position.Label))
+                {
+                    continue;
+                }
+
+                result.Add(position);
+            }
+
+            return result;
+        }
+
+        // البحث بمعرّف الخادم فقط (لا بالرمز ولا بالتعليق).
+        private Position FindOpenPositionById(int positionId)
+        {
+            if (Positions == null || positionId == 0)
+            {
+                return null;
+            }
+
+            foreach (var position in Positions)
+            {
+                if (position != null && position.Id == positionId)
+                {
+                    return position;
+                }
+            }
+
+            return null;
+        }
+
+        private TradeGroup FindGroup(string token)
+        {
+            foreach (var group in _groups)
+            {
+                if (string.Equals(group.Token, token, StringComparison.Ordinal))
+                {
+                    return group;
+                }
+            }
+
+            return null;
+        }
+
+        private void RememberGroup(TradeGroup group)
+        {
+            _groups.Add(group);
+
+            // سقف ذاكرة بسيط: لا تُحفظ إلا مجموعة واحدة لكل شمعة قرار، ونُزيل الأقدم المكتملة.
+            const int maxGroups = 64;
+            if (_groups.Count <= maxGroups)
+            {
+                return;
+            }
+
+            for (var i = 0; i < _groups.Count; i++)
+            {
+                var candidate = _groups[i];
+                if (candidate == group)
+                {
+                    continue;
+                }
+
+                if (candidate.ProtectionDone || candidate.ProtectionFailed)
+                {
+                    _groups.RemoveAt(i);
+                    return;
+                }
+            }
+        }
+
+        // ===========================================================================
+        //  استعادة المجموعات من المراكز المفتوحة (بعد إعادة التشغيل / إعادة الاتصال)
+        //  قراءة فقط: لا أوامر ولا تعديل أوقاف. الغرض منع التكرار واستئناف التتبّع.
+        // ===========================================================================
+        private void AdoptExistingGroups()
+        {
+            var owned = GetBotOwnedPositions();
+            if (owned.Count == 0)
+            {
+                Print($"{LogPrefix} [استعادة] لا مراكز مفتوحة لهذا الـcBot — لا شيء لاستعادته.");
+                return;
+            }
+
+            var tokens = new List<string>();
+            foreach (var position in owned)
+            {
+                string token;
+                string role;
+                if (!TryParseChildLabel(position.Label, out token, out role))
+                {
+                    continue;
+                }
+
+                if (!tokens.Contains(token))
+                {
+                    tokens.Add(token);
+                }
+            }
+
+            foreach (var token in tokens)
+            {
+                var group = FindGroup(token);
+                if (group == null)
+                {
+                    group = new TradeGroup { Token = token };
+                    _groups.Add(group);
+                }
+
+                var openRoles = new List<string>();
+                foreach (var position in owned)
+                {
+                    string positionToken;
+                    string role;
+                    if (!TryParseChildLabel(position.Label, out positionToken, out role))
+                    {
+                        continue;
+                    }
+
+                    if (!string.Equals(positionToken, token, StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    group.TradeType = position.TradeType;
+                    if (role == RoleA) group.IdA = position.Id;
+                    else if (role == RoleB) group.IdB = position.Id;
+                    else group.IdC = position.Id;
+
+                    openRoles.Add($"{role}#{position.Id}");
+                }
+
+                Print($"{LogPrefix} [استعادة] مجموعة {token}: مراكز مفتوحة = {string.Join(", ", openRoles.ToArray())}");
+
+                if (group.IdA != 0)
+                {
+                    Print($"{LogPrefix} [استعادة] Position A مفتوح — ستُفعَّل الحماية عند تأكيد إغلاقه عند هدفه.");
+                    continue;
+                }
+
+                if (group.IdB == 0 && group.IdC == 0)
+                {
+                    continue;
+                }
+
+                // Position A غير مفتوح بعد إعادة التشغيل. لا دليل محلي على أن إغلاقه كان عند
+                // هدف الـ20% (الحالة داخل الذاكرة ضاعت وهذه المعمارية لا تخزّن حالة على القرص)،
+                // لذلك لا نعدّل أي وقف خسارة: الوقف الأصلي يبقى كما هو ولا يُرخّى.
+                if (AreChildrenAlreadyAtBreakEven(group))
+                {
+                    group.ProtectionDone = true;
+                    Print($"{LogPrefix} [استعادة] المراكز المتبقية لمجموعة {token} عند التعادل مسبقاً — لا تعديل.");
+                }
+                else
+                {
+                    Print($"{LogPrefix} [استعادة] ⚠️ مجموعة {token}: Position A غير مفتوح ولا دليل على أنه أُغلق " +
+                          $"عند هدفه — لم تُفعَّل الحماية تلقائياً. وقف الخسارة الأصلي على B/C يبقى قائماً " +
+                          $"(لا يُرخّى ولا يُعدَّل). يلزم تحقق يدوي من سجل الحساب.");
+                }
+            }
+        }
+
+        private bool AreChildrenAlreadyAtBreakEven(TradeGroup group)
+        {
+            var checkedAny = false;
+
+            foreach (var positionId in new[] { group.IdB, group.IdC })
+            {
+                var position = FindOpenPositionById(positionId);
+                if (position == null)
+                {
+                    continue;
+                }
+
+                if (!position.StopLoss.HasValue)
+                {
+                    return false;
+                }
+
+                var entryPrice = position.EntryPrice;
+                var atOrBetter = position.TradeType == TradeType.Buy
+                    ? position.StopLoss.Value >= entryPrice - 1e-9
+                    : position.StopLoss.Value <= entryPrice + 1e-9;
+
+                if (!atOrBetter)
+                {
+                    return false;
+                }
+
+                checkedAny = true;
+            }
+
+            return checkedAny;
+        }
+
+        // ===========================================================================
+        //  حماية B و C بعد تأكيد إغلاق A عند هدفه (20%)
+        // ===========================================================================
+        private void HandleChildClosure(Position closedPosition, PositionCloseReason reason)
+        {
+            if (closedPosition == null)
+            {
+                return;
+            }
+
+            string token;
+            string role;
+            if (!TryParseChildLabel(closedPosition.Label, out token, out role))
+            {
+                return; // مركز ليس من هذا الـcBot
+            }
+
+            if (!string.Equals(closedPosition.SymbolName, _resolvedSymbolName, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            // منع معالجة نفس الإغلاق مرتين (أحداث مكرّرة / إعادة اتصال / استدعاء متكرر).
+            if (!_processedClosures.Add(closedPosition.Id))
+            {
+                Print($"{LogPrefix} [حماية] تجاهل حدث إغلاق مكرّر للمركز #{closedPosition.Id} (عولج مسبقاً).");
+                return;
+            }
+
+            Print($"{LogPrefix} [حماية] أُغلق المركز {role} #{closedPosition.Id} | السبب={reason} | " +
+                  $"NetProfit=${Fmt(closedPosition.NetProfit)}");
+
+            if (role != RoleA)
+            {
+                Print($"{LogPrefix} [حماية] المركز {role} ليس Position A — لا يبدأ أي تفعيل للحماية.");
+                return;
+            }
+
+            var group = FindGroup(token);
+            if (group == null)
+            {
+                group = new TradeGroup { Token = token, TradeType = closedPosition.TradeType };
+                _groups.Add(group);
+                Print($"{LogPrefix} [حماية] مجموعة غير معروفة في الذاكرة (إعادة تشغيل؟) — أُنشئت من وسم المركز #{closedPosition.Id}.");
+            }
+
+            if (group.IdA != 0 && group.IdA != closedPosition.Id)
+            {
+                Print($"{LogPrefix} [حماية] ❌ المركز #{closedPosition.Id} لا يطابق Position A المسجَّل للمجموعة " +
+                      $"{token} (#{group.IdA}) — لا تعديل.");
+                return;
+            }
+
+            group.IdA = closedPosition.Id;
+
+            if (group.ProtectionDone || group.ProtectionFailed)
+            {
+                Print($"{LogPrefix} [حماية] المجموعة {token} عولجت مسبقاً " +
+                      $"(Done={group.ProtectionDone}, Failed={group.ProtectionFailed}) — لا تعديل مكرّر.");
+                return;
+            }
+
+            // شرط التفعيل: تأكيد الإغلاق عند الهدف (منفّذ من الوسيط)، لا مجرد لمس السعر.
+            if (reason != PositionCloseReason.TakeProfit)
+            {
+                Print($"{LogPrefix} [حماية] ❌ لم تُفعَّل الحماية: سبب إغلاق Position A هو '{reason}' وليس TakeProfit.");
+                return;
+            }
+
+            Print($"{LogPrefix} [حماية] ✅ تأكيد إغلاق Position A عند هدفه (20%) — بدء حماية B و C.");
+            ActivateProtection(group);
+        }
+
+        private void ActivateProtection(TradeGroup group)
+        {
+            if (Account.AccountType != AccountType.Hedged)
+            {
+                Print($"{LogPrefix} [حماية] ❌ نوع الحساب {Account.AccountType} وليس Hedged — لا يمكن إدارة مركزين " +
+                      $"مستقلين. لم تُفعَّل الحماية.");
+                group.ProtectionFailed = true;
+                return;
+            }
+
+            var applied = 0;
+            var alreadyProtected = 0;
+            var notOpen = 0;
+            var failed = 0;
+
+            var outcomeB = ProtectChild(group, RoleB, group.IdB);
+            CountOutcome(outcomeB, ref applied, ref alreadyProtected, ref notOpen, ref failed);
+
+            var outcomeC = ProtectChild(group, RoleC, group.IdC);
+            CountOutcome(outcomeC, ref applied, ref alreadyProtected, ref notOpen, ref failed);
+
+            if (failed > 0)
+            {
+                group.ProtectionFailed = true;
+                Print($"{LogPrefix} [حماية] ⚠️ لم تكتمل الحماية: طُبِّق {applied} | تعادل مسبق {alreadyProtected} | " +
+                      $"غير مفتوح {notOpen} | فشل {failed}. وقف الخسارة الأصلي يبقى على ما فشل تعديله، " +
+                      $"ولا تُعاد المحاولة تلقائياً. يلزم تحقق يدوي.");
+            }
+            else if (applied == 0 && alreadyProtected == 0)
+            {
+                // لا ادعاء حماية: لم يكن هناك مركز مفتوح لحمایته أصلاً.
+                group.ProtectionFailed = true;
+                Print($"{LogPrefix} [حماية] ⚠️ لم تُطبَّق أي حماية: لا مراكز مفتوحة لـ B/C عند إغلاق A " +
+                      $"(غير مفتوح {notOpen}). لا أوامر تعويضية ولا وفقة وهمية.");
+            }
+            else
+            {
+                group.ProtectionDone = true;
+                Print($"{LogPrefix} [حماية] ✅ انتهت معالجة الحماية: طُبِّق {applied} | تعادل مسبق {alreadyProtected} | " +
+                      $"غير مفتوح {notOpen}.");
+            }
+        }
+
+        private static void CountOutcome(
+            ProtectionOutcome outcome, ref int applied, ref int alreadyProtected, ref int notOpen, ref int failed)
+        {
+            switch (outcome)
+            {
+                case ProtectionOutcome.Applied:
+                    applied++;
+                    break;
+                case ProtectionOutcome.AlreadyProtected:
+                    alreadyProtected++;
+                    break;
+                case ProtectionOutcome.NotOpen:
+                    notOpen++;
+                    break;
+                default:
+                    failed++;
+                    break;
+            }
+        }
+
+        private ProtectionOutcome ProtectChild(TradeGroup group, string role, int positionId)
+        {
+            if (positionId == 0)
+            {
+                Print($"{LogPrefix} [حماية] المركز {role} لم يُفتح أصلاً — لا شيء لحمايته.");
+                return ProtectionOutcome.NotOpen;
+            }
+
+            var position = FindOpenPositionById(positionId);
+            if (position == null)
+            {
+                Print($"{LogPrefix} [حماية] المركز {role} #{positionId} غير مفتوح (أُغلق مسبقاً) — لا شيء لحمايته.");
+                return ProtectionOutcome.NotOpen;
+            }
+
+            // تحقق مزدوج من الربط: المعرّف من الخادم + الوسم (نفس المجموعة ونفس الدور).
+            string positionToken;
+            string positionRole;
+            if (!TryParseChildLabel(position.Label, out positionToken, out positionRole) ||
+                !string.Equals(positionToken, group.Token, StringComparison.Ordinal) ||
+                positionRole != role)
+            {
+                Print($"{LogPrefix} [حماية] ❌ المركز #{positionId} لا يطابق مجموعة/دور {role} — لا تعديل.");
+                return ProtectionOutcome.Failed;
+            }
+
+            // لا نعدّل وقفاً على مركز بلا هدف ربح على الخادم: تعديل الحماية لا يجوز أن يُفقد الهدف.
+            if (!position.TakeProfit.HasValue)
+            {
+                Print($"{LogPrefix} [حماية] ❌ المركز {role} #{positionId} بلا هدف ربح على الخادم — " +
+                      $"لن يُعدَّل وقف الخسارة كي لا يُفقد الهدف الأصلي.");
+                return ProtectionOutcome.Failed;
+            }
+
+            double breakEvenPrice;
+            string errorReason;
+            if (!TryComputeBreakEvenStop(position, out breakEvenPrice, out errorReason))
+            {
+                Print($"{LogPrefix} [حماية] ❌ المركز {role} #{positionId}: {errorReason}");
+                return ProtectionOutcome.Failed;
+            }
+
+            var existingStop = position.StopLoss;
+            var tick = _targetSymbol != null && _targetSymbol.TickSize > 0 ? _targetSymbol.TickSize : 0.0;
+            var epsilon = tick > 0 ? tick / 2.0 : 1e-9;
+
+            if (existingStop.HasValue && Math.Abs(existingStop.Value - breakEvenPrice) <= epsilon)
+            {
+                Print($"{LogPrefix} [حماية] المركز {role} #{positionId} عند التعادل مسبقاً " +
+                      $"(SL={Fmt(existingStop.Value)}) — لا تعديل.");
+                return ProtectionOutcome.AlreadyProtected;
+            }
+
+            if (existingStop.HasValue)
+            {
+                var loosens = position.TradeType == TradeType.Buy
+                    ? breakEvenPrice < existingStop.Value - epsilon
+                    : breakEvenPrice > existingStop.Value + epsilon;
+
+                if (loosens)
+                {
+                    Print($"{LogPrefix} [حماية] المركز {role} #{positionId}: وقف التعادل ({Fmt(breakEvenPrice)}) " +
+                          $"أسوأ من الوقف الحالي ({Fmt(existingStop.Value)}) — لن يُرخّى الوقف. لا تعديل.");
+                    return ProtectionOutcome.AlreadyProtected;
+                }
+            }
+
+            if (!IsProtectiveStopOnValidSide(position, breakEvenPrice))
+            {
+                Print($"{LogPrefix} [حماية] ❌ المركز {role} #{positionId}: وقف التعادل ({Fmt(breakEvenPrice)}) " +
+                      $"في الجهة الخاطئة من السوق (Bid={Fmt(_targetSymbol.Bid)} / Ask={Fmt(_targetSymbol.Ask)}) — " +
+                      $"لم يُعدَّل الوقف، والوقف الأصلي يبقى قائماً.");
+                return ProtectionOutcome.Failed;
+            }
+
             TradeResult result;
             try
             {
-                result = ExecuteMarketOrder(tradeType, _resolvedSymbolName, volume, OrderLabel, slPips, tpPips, comment, false);
+                // الأسعار مطلقة، وهدف الربح الحالي يُمرَّر صريحاً كي يبقى 50%/100% كما هو.
+                result = ModifyPosition(position, breakEvenPrice, position.TakeProfit, ProtectionType.Absolute);
             }
             catch (Exception ex)
             {
-                Print($"{LogPrefix} [تنفيذ] ❌ استثناء أثناء إرسال الأمر: {ex.GetType().Name}: {ex.Message}");
-                return;
+                Print($"{LogPrefix} [حماية] ❌ استثناء أثناء تعديل المركز {role} #{positionId}: " +
+                      $"{ex.GetType().Name}: {ex.Message}");
+                return ProtectionOutcome.Failed;
             }
 
             if (result == null)
             {
-                Print($"{LogPrefix} [تنفيذ] ❌ فشل: لم تُرجِع المنصة أي TradeResult.");
-                return;
+                Print($"{LogPrefix} [حماية] ❌ لم تُرجِع المنصة أي TradeResult لتعديل المركز {role} #{positionId}.");
+                return ProtectionOutcome.Failed;
             }
 
             if (!result.IsSuccessful)
             {
-                Print($"{LogPrefix} [تنفيذ] ❌ فشل تنفيذ الأمر من المنصة: Error={result.Error?.ToString() ?? "—"} | " +
-                      $"الوصف: {result.ToString()}");
-                Print($"{LogPrefix} [تنفيذ] لن تُعاد المحاولة تلقائياً بنفس الشمعة — انتظار شمعة جديدة بقرار جديد.");
-                return;
+                Print($"{LogPrefix} [حماية] ❌ رُفض تعديل المركز {role} #{positionId}: " +
+                      $"Error={result.Error?.ToString() ?? "—"} | {result}");
+                return ProtectionOutcome.Failed;
             }
 
-            var pos = result.Position;
-            if (pos == null)
+            Print($"{LogPrefix} [حماية] ✅ المركز {role} #{positionId}: SL {FmtNullable(existingStop)} → " +
+                  $"{Fmt(breakEvenPrice)} (تعادل صافي بعد العمولات/السواب) | TP محفوظ: {FmtNullable(position.TakeProfit)}");
+            return ProtectionOutcome.Applied;
+        }
+
+        // ===========================================================================
+        //  حساب وقف التعادل الصافي بعد التكاليف
+        // ---------------------------------------------------------------------------
+        //  التكاليف المطبَّقة: عمولة الذهاب والعودة (Position.Commissions موثّقة كاتجاه واحد)
+        //  ناقص السواب إن كان دائناً. الانتشار مُحتسب أصلاً في سعر الدخول (Ask للشراء و Bid
+        //  للبيع)، فإغلاق الشراء عند سعر الدخول يعادل صفر ربح إجمالي — لا يُضاف الانتشار مرتين.
+        //  التقريب دائماً في اتجاه يغطي التكاليف: لأعلى للشراء ولأسفل للبيع.
+        // ===========================================================================
+        private bool TryComputeBreakEvenStop(Position position, out double stopPrice, out string errorReason)
+        {
+            stopPrice = 0.0;
+            errorReason = null;
+
+            var symbol = _targetSymbol;
+            if (symbol == null || symbol.PipSize <= 0 || symbol.PipValue <= 0)
             {
-                Print($"{LogPrefix} [تنفيذ] ⚠️ TradeResult ناجح لكن بلا Position — لا يمكن تأكيد التفاصيل.");
-                return;
+                errorReason = "مواصفات الرمز غير صالحة لحساب التعادل (PipSize/PipValue)";
+                return false;
             }
 
-            Print($"{LogPrefix} [تنفيذ] ✅ فُتح المركز #{pos.Id} على {pos.SymbolName}:");
-            Print($"{LogPrefix}    السعر الفعلي للتنفيذ (قد يختلف عن اللحظي بسبب الانزلاق): {Fmt(pos.EntryPrice)}");
-            Print($"{LogPrefix}    الحجم الفعلي: {Fmt(pos.VolumeInUnits)} وحدة");
-            Print($"{LogPrefix}    SL الفعلي على الخادم: {FmtNullable(pos.StopLoss)} | TP الفعلي على الخادم: {FmtNullable(pos.TakeProfit)}");
-            Print($"{LogPrefix}    مفتاح منع التكرار (وقت الشمعة): {barTime:yyyy-MM-dd HH:mm} UTC");
+            if (position.VolumeInUnits <= 0)
+            {
+                errorReason = $"حجم المركز غير صالح ({position.VolumeInUnits})";
+                return false;
+            }
+
+            var roundTripCommission = 2.0 * Math.Max(0.0, position.Commissions);
+            var costsUsd = roundTripCommission - position.Swap;
+            if (costsUsd < 0.0)
+            {
+                // لا نرخّي الوقف بسبب سواب دائن: الحد الأدنى هو نقطة الدخول نفسها.
+                costsUsd = 0.0;
+            }
+
+            var costPerUnit = costsUsd / position.VolumeInUnits;
+            var costPips = costPerUnit / symbol.PipValue;
+            var costPriceDistance = costPips * symbol.PipSize;
+
+            var raw = position.TradeType == TradeType.Buy
+                ? position.EntryPrice + costPriceDistance
+                : position.EntryPrice - costPriceDistance;
+
+            stopPrice = RoundPriceToTick(raw, position.TradeType);
+            if (double.IsNaN(stopPrice) || double.IsInfinity(stopPrice) || stopPrice <= 0.0)
+            {
+                errorReason = $"سعر التعادل المحسوب غير صالح ({stopPrice})";
+                return false;
+            }
+
+            return true;
+        }
+
+        private double RoundPriceToTick(double price, TradeType tradeType)
+        {
+            var symbol = _targetSymbol;
+            if (symbol == null)
+            {
+                return price;
+            }
+
+            var digits = Math.Max(0, symbol.Digits);
+            var tick = symbol.TickSize > 0 ? symbol.TickSize : Math.Pow(10, -digits);
+            if (tick <= 0)
+            {
+                return Math.Round(price, digits);
+            }
+
+            var steps = price / tick;
+            // هامش 1e-6 خطوة يمنع أخطاء الفاصلة العائمة من تحويل سعر على الحد إلى الخطوة التالية.
+            var roundedSteps = tradeType == TradeType.Buy
+                ? Math.Ceiling(steps - 1e-6)
+                : Math.Floor(steps + 1e-6);
+
+            return Math.Round(roundedSteps * tick, digits, MidpointRounding.AwayFromZero);
+        }
+
+        private bool IsProtectiveStopOnValidSide(Position position, double stopPrice)
+        {
+            var symbol = _targetSymbol;
+            if (symbol == null)
+            {
+                return false;
+            }
+
+            return position.TradeType == TradeType.Buy
+                ? stopPrice < symbol.Bid
+                : stopPrice > symbol.Ask;
         }
 
         // ===========================================================================
@@ -697,6 +1537,9 @@ namespace cAlgo.Robots
                 var pnl = pos.NetProfit;
                 Print($"{LogPrefix} [إغلاق] أُغلق المركز #{pos.Id} على {pos.SymbolName} | " +
                       $"السبب={args.Reason} | NetProfit=${Fmt(pnl)} | GrossProfit=${Fmt(pos.GrossProfit)}");
+
+                // الحماية أولاً (حماية رأس المال)، ثم إبلاغ Brain بنتيجة الإغلاق كما كان.
+                HandleChildClosure(pos, args.Reason);
                 ReportTradeResult(pnl);
             }
             catch (Exception ex)

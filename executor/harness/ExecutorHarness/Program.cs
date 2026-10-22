@@ -42,7 +42,7 @@ namespace ExecutorHarness
 
     internal sealed class TestAccount : IAccount
     {
-        public AccountType AccountType => AccountType.Hedged;
+        public AccountType AccountType { get; set; } = AccountType.Hedged;
         public bool IsLive { get; set; }
         public int Number { get; set; } = 12345678;
         public string BrokerName { get; set; } = "HarnessBroker";
@@ -97,6 +97,12 @@ namespace ExecutorHarness
         public bool PreOpenPosition = false;
         public Func<OrderCall, TradeResult> OrderResultFactory = null;
         public Func<string, HttpResponse> DecisionTransport = null;
+
+        // --- تقسيم الصفقة وحماية الأرباح ---
+        public AccountType AccountType = AccountType.Hedged;
+        public double CommissionPerPosition = 0.0;
+        public double SwapPerPosition = 0.0;
+        public Func<Position, double?, double?, TradeResult> ModifyResultFactory = null;
     }
 
     internal sealed class ExecFixture
@@ -108,6 +114,20 @@ namespace ExecutorHarness
         public List<OrderCall> Orders = new List<OrderCall>();
         public List<string> HttpGets = new List<string>();
         public List<string> HttpSends = new List<string>();
+    }
+
+    internal static class LabelRoles
+    {
+        public static string Role(string label)
+        {
+            if (string.IsNullOrEmpty(label))
+            {
+                return null;
+            }
+
+            var parts = label.Split('-');
+            return parts.Length == 3 ? parts[2] : null;
+        }
     }
 
     internal static class Program
@@ -287,7 +307,7 @@ namespace ExecutorHarness
                 AtrLookbackBars = s.AtrLookbackBars,
             };
 
-            fixture.Bot.Account = new TestAccount { IsLive = s.IsLive };
+            fixture.Bot.Account = new TestAccount { IsLive = s.IsLive, AccountType = s.AccountType };
             fixture.Bot.RunningMode = RunningMode.RealTime;
             fixture.Bot.IsBacktesting = false;
             fixture.Bot.Time = barStart;
@@ -314,12 +334,15 @@ namespace ExecutorHarness
                 },
                 SendTransport = request =>
                 {
-                    fixture.HttpSends.Add(request.Method + " " + request.Uri);
+                    // ToString().ToUpperInvariant() كي يبقى شكل السجل مطابقاً (POST/PUT…)
+                    // بعد تحويل HttpRequest.Method إلى cAlgo.API.HttpMethod الموثّق.
+                    fixture.HttpSends.Add(request.Method.ToString().ToUpperInvariant() + " " + request.Uri);
                     return new HttpResponse { StatusCode = 200, IsSuccessful = true, Body = "{\"status\":\"recorded\"}" };
                 },
             };
             fixture.Bot.Http = http;
 
+            var nextPositionId = 900000;
             fixture.Bot.OrderExecutor = (tt, sym, vol, label, sl, tp, comment, trailing) =>
             {
                 var call = new OrderCall
@@ -350,7 +373,7 @@ namespace ExecutorHarness
 
                 var position = new Position
                 {
-                    Id = 900001,
+                    Id = ++nextPositionId,
                     SymbolName = sym,
                     TradeType = tt,
                     VolumeInUnits = vol,
@@ -360,11 +383,21 @@ namespace ExecutorHarness
                     Label = label,
                     Comment = comment,
                     EntryTime = barStart,
+                    Commissions = s.CommissionPerPosition,
+                    Swap = s.SwapPerPosition,
                 };
                 positions.AddForTest(position);
 
                 return new TradeResult { IsSuccessful = true, Position = position, Description = "Order executed" };
             };
+
+            // حقن فشل في تعديل الحماية عند طلبه (سيناريو الرفض). في الحالات الطبيعية يُستعمل
+            // السلوك الموثّق داخل الشيم (العكس: ProtectionType.Absolute = أسعار مطلقة).
+            if (s.ModifyResultFactory != null)
+            {
+                fixture.Bot.ModifyExecutor = (position, sl, tp, protectionType) =>
+                    s.ModifyResultFactory(position, sl, tp);
+            }
 
             return fixture;
         }
@@ -384,6 +417,97 @@ namespace ExecutorHarness
         {
             fx.Bot.TimeInUtc = fx.Bars.LastBar != null ? fx.Bars.LastBar.OpenTime : DateTime.UtcNow;
             fx.Bars.RaiseBarClosedForTest();
+        }
+
+        private static Position PositionByRole(ExecFixture fx, string role)
+        {
+            return fx.Positions.FirstOrDefault(p => LabelRoles.Role(p.Label) == role);
+        }
+
+        // محاكاة وصول السوق إلى هدف Position A = 20% من مسافة TP الأصلية (22.5 pip) = 4.5 pip.
+        private static void MoveMarketToA(ExecFixture fx, TradeType tradeType)
+        {
+            var posA = PositionByRole(fx, "A");
+            if (posA == null)
+            {
+                return;
+            }
+
+            var distance = 4.5 * fx.Symbol.PipSize;
+            var spread = fx.Symbol.PipSize;
+
+            if (tradeType == TradeType.Buy)
+            {
+                fx.Symbol.Bid = posA.EntryPrice + distance;
+                fx.Symbol.Ask = fx.Symbol.Bid + spread;
+            }
+            else
+            {
+                fx.Symbol.Ask = posA.EntryPrice - distance;
+                fx.Symbol.Bid = fx.Symbol.Ask - spread;
+            }
+        }
+
+        // إعادة تشغيل الـcBot فوق نفس الحساب (نفس Positions/Bars) — الحالة الداخلية تُفقد.
+        private static void RestartBot(ExecFixture fx)
+        {
+            var previous = fx.Bot;
+            previous.TestStop();
+
+            var bot = new XauBotExecutor
+            {
+                BrainApiHost = previous.BrainApiHost,
+                BrainApiPort = previous.BrainApiPort,
+                UseHttps = previous.UseHttps,
+                BrainApiBasePath = previous.BrainApiBasePath,
+                TargetSymbol = previous.TargetSymbol,
+                ExecutionEnabled = previous.ExecutionEnabled,
+                MaxPositionSizeUsd = previous.MaxPositionSizeUsd,
+                RiskRewardRatio = previous.RiskRewardRatio,
+                StopLossAtrMultiplier = previous.StopLossAtrMultiplier,
+                AtrPeriod = previous.AtrPeriod,
+                AtrLookbackBars = previous.AtrLookbackBars,
+            };
+
+            bot.Account = previous.Account;
+            bot.RunningMode = previous.RunningMode;
+            bot.IsBacktesting = previous.IsBacktesting;
+            bot.Time = previous.Time;
+            bot.TimeInUtc = previous.TimeInUtc;
+            bot.Symbol = previous.Symbol;
+            bot.Symbols = previous.Symbols;
+            bot.Positions = previous.Positions;
+            bot.MarketData = previous.MarketData;
+            bot.Http = previous.Http;
+            bot.OrderExecutor = previous.OrderExecutor;
+            bot.ModifyExecutor = previous.ModifyExecutor;
+
+            fx.Bot = bot;
+            bot.TestStart();
+        }
+
+        // نتيجة تنفيذ ناجحة اصطناعية (لاختبار فشل جزء واحد فقط من الأوامر الثلاثة).
+        private static TradeResult Succeed(ExecFixture fx, OrderCall call, int id)
+        {
+            var entry = call.TradeType == TradeType.Buy ? fx.Symbol.Ask : fx.Symbol.Bid;
+            var sign = call.TradeType == TradeType.Buy ? 1 : -1;
+
+            var position = new Position
+            {
+                Id = id,
+                SymbolName = call.SymbolName,
+                TradeType = call.TradeType,
+                VolumeInUnits = call.Volume,
+                EntryPrice = entry,
+                StopLoss = entry - sign * call.StopLossPips.GetValueOrDefault() * fx.Symbol.PipSize,
+                TakeProfit = entry + sign * call.TakeProfitPips.GetValueOrDefault() * fx.Symbol.PipSize,
+                Label = call.Label,
+                Comment = call.Comment,
+                EntryTime = DateTime.UtcNow,
+            };
+
+            fx.Positions.AddForTest(position);
+            return new TradeResult { IsSuccessful = true, Position = position, Description = "Order executed" };
         }
 
         // -------------------------------------------------------------------------------
@@ -551,52 +675,67 @@ namespace ExecutorHarness
             //  سيناريوهات طبقات التنفيذ (0..7)
             // =========================================================================
 
-            // === H: نجاح فتح صفقة شراء — مع SL و TP مرفقين في نفس الأمر ==============
+            // === H: نجاح فتح صفقة شراء — تقسيم إلى ثلاثة مراكز (20%/50%/100%) ======
             {
-                var s = new ExecSettings { Action = "buy", SizeUsd = 15.0 };
+                var s = new ExecSettings { Action = "buy", SizeUsd = 15.0 }; // 10 وحدات
                 var fx = BuildExecFixture(s);
                 fx.Bot.TestStart();
                 RaiseBar(fx);
 
-                Check(fx.Orders.Count == 1, $"H: أُرسل أمر واحد فقط (الفعل={fx.Orders.Count})");
-                if (fx.Orders.Count == 1)
-                {
-                    var o = fx.Orders[0];
-                    Check(o.TradeType == TradeType.Buy, "H: نوع الأمر Buy");
-                    Check(o.Label == HarnessConstants.OrderLabel, "H: الوسم = XauBotExecutor");
-                    // ATR=1.0 × 1.5 = 1.5 سعر ÷ PipSize 0.1 = 15 pip
-                    Check(Math.Abs(o.StopLossPips.GetValueOrDefault() - 15.0) < 1e-6,
-                        $"H: SL = 15 pip (الفعلي={o.StopLossPips})");
-                    Check(o.TakeProfitPips.HasValue && Math.Abs(o.TakeProfitPips.Value - 22.5) < 1e-6,
-                        $"H: TP = SL×1.5 = 22.5 pip (الفعلي={o.TakeProfitPips})");
-                    Check(o.StopLossPips.HasValue && o.TakeProfitPips.HasValue,
-                        "H: SL و TP مرفقان في نفس الأمر (لا أمر منفصل)");
-                    // raw = 15 / (15 × 0.1) = 10 وحدات
-                    Check(Math.Abs(o.Volume - 10.0) < 1e-6, $"H: الحجم = 10 وحدة (الفعلي={o.Volume})");
-                }
-                Check(Count(fx.Bot, "✅ فُتح المركز") == 1, "H: سُجِّل فتح المركز مع التفاصيل");
-                Check(Contains(fx.Bot, "SL الفعلي على الخادم") && Contains(fx.Bot, "TP الفعلي على الخادم"),
+                var orderA = fx.Orders.FirstOrDefault(o => LabelRoles.Role(o.Label) == "A");
+                var orderB = fx.Orders.FirstOrDefault(o => LabelRoles.Role(o.Label) == "B");
+                var orderC = fx.Orders.FirstOrDefault(o => LabelRoles.Role(o.Label) == "C");
+
+                Check(fx.Orders.Count == 3, $"H: أُرسل 3 أوامر (الفعلي={fx.Orders.Count})");
+                Check(orderA != null && orderB != null && orderC != null, "H: المراكز الثلاثة A/B/C موجودة");
+                Check(fx.Orders.All(o => o.Label.StartsWith(HarnessConstants.OrderLabel, StringComparison.Ordinal)),
+                    "H: كل الأوامر تحمل وسم هذا الـcBot (بادئة XauBotExecutor)");
+                Check(fx.Orders.All(o => o.TradeType == TradeType.Buy), "H: كل الأوامر Buy (نفس اتجاه القرار)");
+                // ATR=1.0 × 1.5 = 1.5 سعر ÷ PipSize 0.1 = 15 pip — نفس المسافة الأصلية على كل مركز
+                Check(fx.Orders.All(o => o.StopLossPips.HasValue && Math.Abs(o.StopLossPips.Value - 15.0) < 1e-6),
+                    "H: مسافة SL الأصلية = 15 pip على كل مركز (بلا تغيير)");
+                Check(orderA != null && Math.Abs(orderA.TakeProfitPips.GetValueOrDefault() - 4.5) < 1e-9,
+                    $"H: TP لـ A = 20% من المسافة الأصلية = 4.5 pip (الفعلي={orderA?.TakeProfitPips})");
+                Check(orderB != null && Math.Abs(orderB.TakeProfitPips.GetValueOrDefault() - 11.25) < 1e-9,
+                    $"H: TP لـ B = 50% = 11.25 pip (الفعلي={orderB?.TakeProfitPips})");
+                Check(orderC != null && Math.Abs(orderC.TakeProfitPips.GetValueOrDefault() - 22.5) < 1e-9,
+                    $"H: TP لـ C = 100% من المسافة الأصلية = 22.5 pip (الفعلي={orderC?.TakeProfitPips})");
+                Check(orderA != null && Math.Abs(orderA.Volume - 4.0) < 1e-9 &&
+                      orderB != null && Math.Abs(orderB.Volume - 3.0) < 1e-9 &&
+                      orderC != null && Math.Abs(orderC.Volume - 3.0) < 1e-9,
+                    $"H: توزيع 10 وحدات = 4/3/3 (الفعلي={orderA?.Volume}/{orderB?.Volume}/{orderC?.Volume})");
+                Check(Math.Abs(fx.Orders.Sum(o => o.Volume) - 10.0) < 1e-9,
+                    $"H: مجموع الأحجام = الإجمالي المطلوب 10 (الفعلي={fx.Orders.Sum(o => o.Volume)})");
+                Check(Count(fx.Bot, "✅ فُتح المركز") == 3, "H: سُجِّل فتح المراكز الثلاثة مع تفاصيلها");
+                Check(Contains(fx.Bot, "SL الفعلي") && Contains(fx.Bot, "TP الفعلي"),
                     "H: سُجِّل SL/TP الفعليان على الخادم");
-                Check(fx.Positions.Count == 1, "H: صار في الحساب مركز مفتوح واحد");
+                Check(fx.Positions.Count == 3, $"H: صار في الحساب 3 مراكز مفتوحة (الفعلي={fx.Positions.Count})");
+                Check(fx.HttpGets.Count == 1 && fx.HttpGets[0].Contains("/decide-log-only") &&
+                      fx.HttpGets[0].Contains("symbol=" + opts.Symbol) && fx.HttpGets[0].Contains("timeframe=M15"),
+                    "H: عقد Brain API لم يتغيّر (نداء واحد إلى /decide-log-only)");
+                Check(fx.Bot.ModifyCalls.Count == 0, "H: لا تعديل على المراكز قبل إغلاق Position A");
 
                 WriteLog(opts, "scenario_H_execution_success_buy.log", fx.Bot);
-                summary.Add($"H exec-success-buy: orders={fx.Orders.Count}, volume={(fx.Orders.Count == 1 ? fx.Orders[0].Volume.ToString(CultureInfo.InvariantCulture) : "—")}");
+                summary.Add($"H split-buy: orders={fx.Orders.Count}, volumes={string.Join("/", fx.Orders.Select(o => o.Volume.ToString(CultureInfo.InvariantCulture)).ToArray())}");
             }
 
-            // === H2: نجاح فتح صفقة بيع ===============================================
+            // === H2: نجاح فتح صفقة بيع مقسومة ==========================================
             {
                 var s = new ExecSettings { Action = "sell", SizeUsd = 15.0 };
                 var fx = BuildExecFixture(s);
                 fx.Bot.TestStart();
                 RaiseBar(fx);
 
-                Check(fx.Orders.Count == 1 && fx.Orders[0].TradeType == TradeType.Sell,
-                    "H2: أُرسل أمر Sell واحد مع SL/TP");
-                Check(fx.Orders.Count == 1 && fx.Orders[0].StopLossPips.HasValue && fx.Orders[0].TakeProfitPips.HasValue,
-                    "H2: SL/TP مرفقان في أمر البيع");
+                Check(fx.Orders.Count == 3 && fx.Orders.All(o => o.TradeType == TradeType.Sell),
+                    $"H2: أُرسلت ثلاثة أوامر Sell (الفعلي={fx.Orders.Count})");
+                Check(fx.Orders.All(o => o.StopLossPips.HasValue && o.TakeProfitPips.HasValue),
+                    "H2: SL/TP مرفقان في كل أمر بيع");
+                var sellOrderC = fx.Orders.FirstOrDefault(o => LabelRoles.Role(o.Label) == "C");
+                Check(sellOrderC != null && Math.Abs(sellOrderC.TakeProfitPips.GetValueOrDefault() - 22.5) < 1e-9,
+                    "H2: TP لـ C في البيع = المسافة الأصلية 22.5 pip");
 
                 WriteLog(opts, "scenario_H2_execution_success_sell.log", fx.Bot);
-                summary.Add($"H2 exec-success-sell: orders={fx.Orders.Count}");
+                summary.Add($"H2 split-sell: orders={fx.Orders.Count}");
             }
 
             // === I: رفض لـExecutionEnabled=false =====================================
@@ -740,7 +879,7 @@ namespace ExecutorHarness
                 RaiseBar(fx);
                 RaiseBar(fx);
 
-                Check(fx.Orders.Count == 1, $"Q: أمر واحد فقط لنفس الشمعة (الفعلي={fx.Orders.Count})");
+                Check(fx.Orders.Count == 3, $"Q: ثلاثة أوامر فقط لنفس الشمعة (الفعلي={fx.Orders.Count})");
                 Check(Contains(fx.Bot, "منع تكرار"), "Q: سُجِّل منع التكرار لنفس الشمعة");
 
                 WriteLog(opts, "scenario_Q_idempotency.log", fx.Bot);
@@ -754,10 +893,10 @@ namespace ExecutorHarness
                 fx.Bot.TestStart();
                 RaiseBar(fx);
 
-                Check(fx.Positions.Count == 1, "R: فُتح مركز واحد قبل الإغلاق");
-                var opened = fx.Positions[0];
+                var opened = fx.Positions.FirstOrDefault(p => LabelRoles.Role(p.Label) == "A");
+                Check(fx.Positions.Count == 3 && opened != null, "R: فُتحت المراكز الثلاثة قبل الإغلاق");
 
-                // إغلاق المركز على TP (كما تفعل المنصة) — يُطلق حدث Positions.Closed.
+                // إغلاق Position A على TP (كما تفعل المنصة) — يُطلق حدث Positions.Closed.
                 fx.Positions.CloseForTest(opened, netProfit: 12.5, reason: PositionCloseReason.TakeProfit);
 
                 Check(fx.HttpSends.Count == 1, $"R: أُرسل نداء POST واحد للإغلاق (الفعلي={fx.HttpSends.Count})");
@@ -770,6 +909,480 @@ namespace ExecutorHarness
 
                 WriteLog(opts, "scenario_R_position_closed_report.log", fx.Bot);
                 summary.Add($"R position-closed-report: sends={fx.HttpSends.Count}");
+            }
+
+            // =========================================================================
+            //  سيناريوهات تقسيم الصفقة وحماية الأرباح
+            //  مواصفات الرمز الاصطناعية: PipSize=0.1، PipValue=0.1، خطوة=1 وحدة،
+            //  ATR=1.0 × 1.5 ÷ 0.1 ⇒ SL=15 pip، و TP=22.5 pip، والحجم = المخاطرة ÷ 1.5.
+            //  كل 100 وحدة = لوت واحد ⇒ الأرقام في جدول المواصفة (0.04 لوت = 4 وحدات).
+            // =========================================================================
+
+            // === S1: جدول توزيع الحجم (يحفظ الإجمالي بالضبط) =========================
+            {
+                var rows = new[]
+                {
+                    new { Units = 4.0, Expected = new[] { 2.0, 1.0, 1.0 } },
+                    new { Units = 6.0, Expected = new[] { 2.0, 2.0, 2.0 } },
+                    new { Units = 7.0, Expected = new[] { 3.0, 2.0, 2.0 } },
+                    new { Units = 8.0, Expected = new[] { 4.0, 2.0, 2.0 } },
+                    new { Units = 9.0, Expected = new[] { 3.0, 3.0, 3.0 } },
+                    new { Units = 10.0, Expected = new[] { 4.0, 3.0, 3.0 } },
+                    new { Units = 12.0, Expected = new[] { 4.0, 4.0, 4.0 } },
+                };
+
+                var tableSummary = new List<string>();
+
+                foreach (var row in rows)
+                {
+                    var s = new ExecSettings { Action = "buy", SizeUsd = row.Units * 1.5 };
+                    var fx = BuildExecFixture(s);
+                    fx.Bot.TestStart();
+                    RaiseBar(fx);
+
+                    var volumes = new double[3];
+                    var roleNames = new[] { "A", "B", "C" };
+                    for (var i = 0; i < 3; i++)
+                    {
+                        var role = roleNames[i];
+                        var order = fx.Orders.FirstOrDefault(o => LabelRoles.Role(o.Label) == role);
+                        volumes[i] = order != null ? order.Volume : -1.0;
+                    }
+
+                    var countOk = fx.Orders.Count == 3;
+                    var volumesOk = Math.Abs(volumes[0] - row.Expected[0]) < 1e-9 &&
+                                    Math.Abs(volumes[1] - row.Expected[1]) < 1e-9 &&
+                                    Math.Abs(volumes[2] - row.Expected[2]) < 1e-9;
+
+                    Check(countOk && volumesOk,
+                        $"S1: توزيع {row.Units} وحدة (= {row.Units / 100.0} لوت) = " +
+                        $"{row.Expected[0]}/{row.Expected[1]}/{row.Expected[2]} " +
+                        $"(الفعلي={volumes[0]}/{volumes[1]}/{volumes[2]}, الأوامر={fx.Orders.Count})");
+
+                    Check(Math.Abs(fx.Orders.Sum(o => o.Volume) - row.Units) < 1e-9,
+                        $"S1: مجموع الأحجام = الإجمالي {row.Units} بلا حذف أو تجاوز");
+
+                    tableSummary.Add($"{row.Units}→{volumes[0]}/{volumes[1]}/{volumes[2]}");
+                }
+
+                summary.Add("S1 volume-allocation: " + string.Join(", ", tableSummary.ToArray()));
+            }
+
+            // === S2: حالات استحالة التقسيم (حد أدنى/خطوة/حساب غير Hedged) ============
+            {
+                // (أ) الإجمالي أقل من ثلاث خطوات
+                var small = BuildExecFixture(new ExecSettings { Action = "buy", SizeUsd = 3.0 });
+                small.Bot.TestStart();
+                RaiseBar(small);
+                Check(small.Orders.Count == 0, $"S2a: لا أمر عندما يستحيل تقسيم الحجم (الفعلي={small.Orders.Count})");
+                Check(Contains(small.Bot, "أقل من ثلاث خطوات"), "S2a: سُجِّل القيد الفعلي المانع للتقسيم");
+                Check(Contains(small.Bot, "لم يُرسل أي أمر"), "S2a: سُجِّل عدم إرسال أي أمر بلا تقريب/حذف");
+                Check(Contains(small.Bot, "البدائل المطلوبة"), "S2a: سُجِّلت البدائل المطلوبة من مالك المشروع");
+
+                // (ب) الحد الأدنى للمركز (2 وحدات) يمنع توزيع 4 وحدات = 2/1/1
+                var minCase = BuildExecFixture(new ExecSettings
+                {
+                    Action = "buy",
+                    SizeUsd = 6.0,
+                    Spec = new SymbolSpec { Min = 2.0 },
+                });
+                minCase.Bot.TestStart();
+                RaiseBar(minCase);
+                Check(minCase.Orders.Count == 0, "S2b: لا أمر عندما يكون حجم أحد المراكز تحت الحد الأدنى");
+                Check(Contains(minCase.Bot, "أقل من الحد الأدنى"), "S2b: سُجِّل قيد الحد الأدنى بالتفصيل");
+
+                // (ج) خطوة غير صحيحة (0.5) مع 7 وحدات ⇒ 3/2/2
+                var stepCase = BuildExecFixture(new ExecSettings
+                {
+                    Action = "buy",
+                    SizeUsd = 10.5,
+                    Spec = new SymbolSpec { Step = 0.5 },
+                });
+                stepCase.Bot.TestStart();
+                RaiseBar(stepCase);
+                Check(stepCase.Orders.Count == 3 &&
+                      Math.Abs(stepCase.Orders.Sum(o => o.Volume) - 7.0) < 1e-9,
+                    $"S2c: خطوة 0.5 تحفظ الإجمالي 7 (الأوامر={stepCase.Orders.Count})");
+                Check(stepCase.Orders.Count == 3 &&
+                      Math.Abs(stepCase.Orders.First(o => LabelRoles.Role(o.Label) == "A").Volume - 3.0) < 1e-9,
+                    "S2c: الباقي كله إلى A (3/2/2)");
+
+                // (د) حساب Netted لا يقبل ثلاثة مراكز مستقلة
+                var netted = BuildExecFixture(new ExecSettings
+                {
+                    Action = "buy",
+                    SizeUsd = 15.0,
+                    AccountType = AccountType.Netted,
+                });
+                netted.Bot.TestStart();
+                RaiseBar(netted);
+                Check(netted.Orders.Count == 0, "S2d: لا أمر على حساب Netted (لا تقسيم ممكن)");
+                Check(Contains(netted.Bot, "وليس Hedged"), "S2d: سُجِّل نوع الحساب المانع");
+
+                summary.Add($"S2 allocation-guards: small={small.Orders.Count}, min={minCase.Orders.Count}, " +
+                            $"step={stepCase.Orders.Count}, netted={netted.Orders.Count}");
+            }
+
+            // === S3: الحماية بعد تأكيد إغلاق A عند هدفه (شراء + تكاليف + استقلال) ===
+            {
+                var s = new ExecSettings { Action = "buy", SizeUsd = 15.0, CommissionPerPosition = 0.05 };
+                var fx = BuildExecFixture(s);
+                fx.Bot.TestStart();
+                RaiseBar(fx);
+
+                var posA = PositionByRole(fx, "A");
+                var posB = PositionByRole(fx, "B");
+                var posC = PositionByRole(fx, "C");
+                var tpB = posB.TakeProfit;
+                var tpC = posC.TakeProfit;
+                var originalSlB = posB.StopLoss;
+
+                // سواب سالب على C فقط ⇒ تعادل مختلف عن B (إدارة مستقلة لكل مركز).
+                posC.Swap = -0.20;
+
+                MoveMarketToA(fx, TradeType.Buy);
+                fx.Positions.CloseForTest(posA, netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
+
+                var callB = fx.Bot.ModifyCalls.FirstOrDefault(c => c.PositionId == posB.Id);
+                var callC = fx.Bot.ModifyCalls.FirstOrDefault(c => c.PositionId == posC.Id);
+
+                Check(fx.Bot.ModifyCalls.Count == 2, $"S3: تعديلان فقط (B و C) بعد إغلاق A (الفعلي={fx.Bot.ModifyCalls.Count})");
+                // B: عمولة 0.05 × 2 = 0.10 على 3 وحدات ⇒ 0.0333 سعر ⇒ تقريب لأعلى ⇒ 2000.14
+                Check(callB != null && Math.Abs(callB.StopLoss.GetValueOrDefault() - 2000.14) < 1e-9,
+                    $"S3: تعادل B يشمل العمولة = 2000.14 (الفعلي={callB?.StopLoss})");
+                // C: + سواب -0.20 ⇒ 0.30 على 3 وحدات ⇒ 0.10 سعر ⇒ 2000.20
+                Check(callC != null && Math.Abs(callC.StopLoss.GetValueOrDefault() - 2000.20) < 1e-9,
+                    $"S3: تعادل C يشمل العمولة والسواب = 2000.20 (الفعلي={callC?.StopLoss})");
+                Check(callB != null && callB.ProtectionType == ProtectionType.Absolute,
+                    "S3: التعديل بأسعار مطلقة (ProtectionType.Absolute)");
+                Check(callB != null && callB.TakeProfit == tpB && callC != null && callC.TakeProfit == tpC,
+                    "S3: هدف B و C مُمرَّر كما هو في طلب التعديل (لا فقدان للهدف)");
+                Check(posB.TakeProfit == tpB && posC.TakeProfit == tpC, "S3: هدف 50%/100% لم يتغيّر على الخادم");
+                Check(posB.StopLoss.GetValueOrDefault() > posB.EntryPrice &&
+                      posC.StopLoss.GetValueOrDefault() > posC.EntryPrice,
+                    "S3: وقف الشراء أصبح أعلى من الدخول (تغطية التكاليف)");
+                Check(posB.StopLoss != originalSlB, "S3: وقف B لم يبقَ الأصلي (نُقل للتعادل)");
+                Check(fx.Orders.Count == 3, "S3: لا أوامر جديدة بعد الحماية");
+                Check(Contains(fx.Bot, "✅ المركز B") && Contains(fx.Bot, "✅ المركز C"),
+                    "S3: سُجِّل نجاح حماية B و C");
+                Check(!Contains(fx.Bot, "لم تكتمل الحماية"), "S3: لم يُسجَّل أي فشل حماية");
+
+                WriteLog(opts, "scenario_S3_protection_buy_costs.log", fx.Bot);
+                summary.Add($"S3 protect-buy: modifies={fx.Bot.ModifyCalls.Count}, SL_B={posB.StopLoss}, SL_C={posC.StopLoss}");
+            }
+
+            // === S4: الحماية لا تُفعَّل قبل تأكيد إغلاق A عند هدفه ==================
+            {
+                var s = new ExecSettings { Action = "buy", SizeUsd = 15.0 };
+                var fx = BuildExecFixture(s);
+                fx.Bot.TestStart();
+                RaiseBar(fx);
+                RaiseBar(fx);
+
+                Check(fx.Bot.ModifyCalls.Count == 0, "S4: لا حماية قبل أي إغلاق");
+
+                var posB = PositionByRole(fx, "B");
+                var posA = PositionByRole(fx, "A");
+                MoveMarketToA(fx, TradeType.Buy);
+
+                fx.Positions.CloseForTest(posB, netProfit: 2.0, reason: PositionCloseReason.TakeProfit);
+                Check(fx.Bot.ModifyCalls.Count == 0, "S4: إغلاق B عند هدفه لا يفعّل الحماية");
+                Check(Contains(fx.Bot, "ليس Position A"), "S4: سُجِّل أن المركز المغلق ليس A");
+
+                fx.Positions.CloseForTest(posA, netProfit: 1.0, reason: PositionCloseReason.Closed);
+                Check(fx.Bot.ModifyCalls.Count == 0, "S4: إغلاق A يدوياً (ليس TP) لا يفعّل الحماية");
+                Check(Contains(fx.Bot, "وليس TakeProfit"), "S4: سُجِّل سبب عدم التفعيل");
+                Check(fx.Orders.Count == 3, "S4: لا أوامر جديدة");
+
+                WriteLog(opts, "scenario_S4_no_premature_protection.log", fx.Bot);
+                summary.Add($"S4 no-premature-protection: modifies={fx.Bot.ModifyCalls.Count}");
+            }
+
+            // === S5: اتجاه وقف الحماية للبيع =========================================
+            {
+                var s = new ExecSettings { Action = "sell", SizeUsd = 15.0, CommissionPerPosition = 0.05 };
+                var fx = BuildExecFixture(s);
+                fx.Bot.TestStart();
+                RaiseBar(fx);
+
+                var posA = PositionByRole(fx, "A");
+                var posB = PositionByRole(fx, "B");
+                var posC = PositionByRole(fx, "C");
+
+                MoveMarketToA(fx, TradeType.Sell);
+                fx.Positions.CloseForTest(posA, netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
+
+                Check(fx.Bot.ModifyCalls.Count == 2, "S5: تعديلان بعد إغلاق A في البيع");
+                Check(posB.StopLoss.GetValueOrDefault() < posB.EntryPrice &&
+                      posC.StopLoss.GetValueOrDefault() < posC.EntryPrice,
+                    "S5: وقف SELL أسفل سعر الدخول (تغطية التكاليف)");
+                Check(Math.Abs(posB.StopLoss.GetValueOrDefault() - 1999.96) < 1e-9,
+                    $"S5: تعادل B للبيع = 1999.96 (الفعلي={posB.StopLoss})");
+                Check(posB.StopLoss.GetValueOrDefault() > fx.Symbol.Ask,
+                    "S5: الوقف أعلى من Ask الحالي ⇒ جهة صحيحة للبيع");
+                Check(posB.TakeProfit.HasValue && posC.TakeProfit.HasValue,
+                    "S5: أهداف البيع محفوظة بعد التعديل");
+
+                WriteLog(opts, "scenario_S5_protection_sell.log", fx.Bot);
+                summary.Add($"S5 protect-sell: SL_B={posB.StopLoss}, Ask={fx.Symbol.Ask}");
+            }
+
+            // === S6: تعادل غير صالح (في الجهة الخاطئة من السوق) =====================
+            {
+                var s = new ExecSettings { Action = "buy", SizeUsd = 15.0, CommissionPerPosition = 0.05 };
+                var fx = BuildExecFixture(s);
+                fx.Bot.TestStart();
+                RaiseBar(fx);
+
+                var posA = PositionByRole(fx, "A");
+                var posB = PositionByRole(fx, "B");
+                var posC = PositionByRole(fx, "C");
+                var slB = posB.StopLoss;
+                var slC = posC.StopLoss;
+
+                // السوق لم يتحرك: وقف التعادل (2000.14) أعلى من Bid (2000.0) ⇒ طلب غير صالح.
+                fx.Positions.CloseForTest(posA, netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
+
+                Check(fx.Bot.ModifyCalls.Count == 0, "S6: لم يُرسل أي تعديل غير صالح للمنصة");
+                Check(Contains(fx.Bot, "الجهة الخاطئة"), "S6: سُجِّل سبب رفض وقف التعادل");
+                Check(posB.StopLoss == slB && posC.StopLoss == slC, "S6: الوقفان الأصليان بقيا كما هما");
+                Check(!Contains(fx.Bot, "✅ المركز B"), "S6: لم يُدَّعَ نجاح الحماية");
+                Check(Contains(fx.Bot, "لم تكتمل الحماية"), "S6: سُجِّل فشل الحماية بوضوح");
+
+                WriteLog(opts, "scenario_S6_invalid_protective_side.log", fx.Bot);
+                summary.Add("S6 invalid-protective-side: no modify, original SL kept");
+            }
+
+            // === S7: رفض المنصة لتعديل وقف الحماية ===================================
+            {
+                var s = new ExecSettings
+                {
+                    Action = "buy",
+                    SizeUsd = 15.0,
+                    CommissionPerPosition = 0.05,
+                    ModifyResultFactory = (position, sl, tp) => new TradeResult
+                    {
+                        IsSuccessful = false,
+                        Error = ErrorCode.InvalidStopLoss,
+                        Description = "Invalid stop loss",
+                    },
+                };
+                var fx = BuildExecFixture(s);
+
+                fx.Bot.TestStart();
+                RaiseBar(fx);
+
+                var posA = PositionByRole(fx, "A");
+                var posB = PositionByRole(fx, "B");
+                var posC = PositionByRole(fx, "C");
+                var slB = posB.StopLoss;
+                var slC = posC.StopLoss;
+
+                MoveMarketToA(fx, TradeType.Buy);
+                fx.Positions.CloseForTest(posA, netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
+
+                Check(fx.Bot.ModifyCalls.Count == 2, "S7: حُوِّل تعديلان للمنصة");
+                Check(Contains(fx.Bot, "رُفض تعديل"), "S7: سُجِّل رفض المنصة للتعديل");
+                Check(Contains(fx.Bot, "InvalidStopLoss"), "S7: سُجِّل رمز خطأ المنصة");
+                Check(posB.StopLoss == slB && posC.StopLoss == slC, "S7: الوقفان الأصليان بقيا كما هما");
+                Check(!Contains(fx.Bot, "✅ المركز B"), "S7: لا ادعاء بنجاح الحماية");
+                Check(Contains(fx.Bot, "لم تكتمل الحماية"), "S7: سُجِّل فشل الحماية");
+
+                WriteLog(opts, "scenario_S7_modify_rejected.log", fx.Bot);
+                summary.Add("S7 modify-rejected: logged, SL unchanged, no false success");
+            }
+
+            // === S8: أحداث إغلاق مكرّرة + إعادة النداء =============================
+            {
+                var s = new ExecSettings { Action = "buy", SizeUsd = 15.0, CommissionPerPosition = 0.05 };
+                var fx = BuildExecFixture(s);
+                fx.Bot.TestStart();
+                RaiseBar(fx);
+
+                var posA = PositionByRole(fx, "A");
+                MoveMarketToA(fx, TradeType.Buy);
+                fx.Positions.CloseForTest(posA, netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
+
+                Check(fx.Bot.ModifyCalls.Count == 2, "S8: تعديلان بعد الإغلاق الأول");
+
+                // نفس الحدث يُطلق مرة أخرى (إعادة اتصال / استدعاء متكرر).
+                fx.Positions.CloseForTest(posA, netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
+                Check(fx.Bot.ModifyCalls.Count == 2, "S8: حدث إغلاق مكرّر لا يُنتج تعديلاً إضافياً");
+                Check(Contains(fx.Bot, "مكرّر"), "S8: سُجِّل تجاهل الحدث المكرّر");
+
+                RaiseBar(fx);
+                Check(fx.Bot.ModifyCalls.Count == 2 && fx.Orders.Count == 3,
+                    "S8: إعادة النداء/الشمعة لا تُكرّر الحماية ولا تفتح أوامر");
+
+                WriteLog(opts, "scenario_S8_duplicate_close_events.log", fx.Bot);
+                summary.Add($"S8 duplicate-close: modifies={fx.Bot.ModifyCalls.Count}, orders={fx.Orders.Count}");
+            }
+
+            // === S9: فشل جزئي في إرسال الأوامر =======================================
+            {
+                var s = new ExecSettings { Action = "buy", SizeUsd = 15.0, CommissionPerPosition = 0.05 };
+                var fx = BuildExecFixture(s);
+                var nextId = 800000;
+
+                // A ينجح، B يرفضه الوسيط، C لا يُرسل إطلاقاً.
+                s.OrderResultFactory = call => LabelRoles.Role(call.Label) == "B"
+                    ? new TradeResult
+                    {
+                        IsSuccessful = false,
+                        Error = ErrorCode.TechnicalError,
+                        Description = "Rejected by broker",
+                    }
+                    : Succeed(fx, call, ++nextId);
+
+                fx.Bot.TestStart();
+                RaiseBar(fx);
+
+                Check(fx.Orders.Count == 2, $"S9: حُوِّل أمران فقط (A ثم B) (الفعلي={fx.Orders.Count})");
+                Check(fx.Positions.Count == 1, $"S9: فُتح مركز واحد فقط (الفعلي={fx.Positions.Count})");
+                Check(Contains(fx.Bot, "حالة جزئية"), "S9: سُجِّلت الحالة الجزئية بوضوح");
+                Check(Contains(fx.Bot, "لن تُفتح أي أوامر بديلة"), "S9: سُجِّل عدم فتح أوامر بديلة");
+                Check(!Contains(fx.Bot, "اكتمل التقسيم"), "S9: لم يُدَّعَ اكتمال التقسيم");
+
+                // إغلاق A لاحقاً: لا B/C لحمایتهما، ولا أمر تعويضي.
+                var posA = PositionByRole(fx, "A");
+                MoveMarketToA(fx, TradeType.Buy);
+                fx.Positions.CloseForTest(posA, netProfit: 1.5, reason: PositionCloseReason.TakeProfit);
+
+                Check(fx.Bot.ModifyCalls.Count == 0, "S9: لا تعديل حماية عند عدم وجود B/C");
+                Check(Contains(fx.Bot, "لم يُفتح أصلاً"), "S9: سُجِّل أن B/C لم تُفتح");
+                Check(fx.Orders.Count == 2, "S9: لم يُفتح أي أمر تعويضي بعد الفشل");
+
+                WriteLog(opts, "scenario_S9_partial_placement.log", fx.Bot);
+                summary.Add($"S9 partial-placement: attempts={fx.Orders.Count}, open={fx.Positions.Count}, modifies={fx.Bot.ModifyCalls.Count}");
+            }
+
+            // === S10: إعادة التشغيل مع بقاء A/B/C مفتوحة =============================
+            {
+                var s = new ExecSettings { Action = "buy", SizeUsd = 15.0, CommissionPerPosition = 0.05 };
+                var fx = BuildExecFixture(s);
+                fx.Bot.TestStart();
+                RaiseBar(fx);
+                Check(fx.Positions.Count == 3, "S10: ثلاثة مراكز مفتوحة قبل إعادة التشغيل");
+
+                RestartBot(fx);
+                Check(Contains(fx.Bot, "[استعادة]") && Contains(fx.Bot, "Position A مفتوح"),
+                    "S10: استُعيدت المجموعة من المراكز المفتوحة بعد إعادة التشغيل");
+                Check(fx.Orders.Count == 3, "S10: لا أوامر جديدة عند إعادة التشغيل");
+
+                RaiseBar(fx);
+                Check(fx.Orders.Count == 3, "S10: لا أوامر جديدة بعد إعادة التشغيل");
+                Check(Contains(fx.Bot, "مركز مفتوح مسبقاً"), "S10: منع الدخول لوجود مراكز مفتوحة");
+
+                var posA = PositionByRole(fx, "A");
+                MoveMarketToA(fx, TradeType.Buy);
+                fx.Positions.CloseForTest(posA, netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
+
+                Check(fx.Bot.ModifyCalls.Count == 2, $"S10: الحماية عملت بعد إعادة التشغيل (الفعلي={fx.Bot.ModifyCalls.Count})");
+                Check(Contains(fx.Bot, "✅ المركز B"), "S10: سُجِّل نجاح حماية B بعد إعادة التشغيل");
+
+                WriteLog(opts, "scenario_S10_restart_positions_open.log", fx.Bot);
+                summary.Add($"S10 restart-open: modifies={fx.Bot.ModifyCalls.Count}, orders={fx.Orders.Count}");
+            }
+
+            // === S11: إعادة التشغيل وبقاء B/C فقط (A أُغلق أثناء التوقّف) ==========
+            {
+                var s = new ExecSettings { Action = "buy", SizeUsd = 15.0, CommissionPerPosition = 0.05 };
+                var fx = BuildExecFixture(s);
+                fx.Bot.TestStart();
+                RaiseBar(fx);
+
+                var posA = PositionByRole(fx, "A");
+                var posB = PositionByRole(fx, "B");
+                var posC = PositionByRole(fx, "C");
+                var slB = posB.StopLoss;
+                var slC = posC.StopLoss;
+
+                // A اختفى بلا حدث إغلاق (أُغلق والـcBot متوقف) ⇒ لا دليل على أنه أُغلق عند هدفه.
+                fx.Positions.RemoveForTest(posA);
+
+                RestartBot(fx);
+
+                Check(Contains(fx.Bot, "لا دليل"), "S11: سُجِّل أن حالة A غير معروفة بعد إعادة التشغيل");
+                Check(Contains(fx.Bot, "يلزم تحقق يدوي"), "S11: طُلب تحقق يدوي من سجل الحساب");
+                Check(fx.Bot.ModifyCalls.Count == 0, "S11: لم تُعدَّل أوقاف B/C بلا دليل على إغلاق A عند هدفه");
+                Check(posB.StopLoss == slB && posC.StopLoss == slC, "S11: الوقفان الأصليان بقيا كما هما");
+                Check(fx.Orders.Count == 3, "S11: لا أوامر جديدة");
+
+                WriteLog(opts, "scenario_S11_restart_missing_a.log", fx.Bot);
+                summary.Add("S11 restart-missing-A: no blind modification, manual review flagged");
+            }
+
+            // === S12: إعادة التشغيل بعد حماية ناجحة (لا تعديل مكرّر) ================
+            {
+                var s = new ExecSettings { Action = "buy", SizeUsd = 15.0, CommissionPerPosition = 0.05 };
+                var fx = BuildExecFixture(s);
+                fx.Bot.TestStart();
+                RaiseBar(fx);
+
+                var posA = PositionByRole(fx, "A");
+                MoveMarketToA(fx, TradeType.Buy);
+                fx.Positions.CloseForTest(posA, netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
+                Check(fx.Bot.ModifyCalls.Count == 2, "S12: تمت الحماية قبل إعادة التشغيل");
+
+                var posB = PositionByRole(fx, "B");
+                var posC = PositionByRole(fx, "C");
+                var protectedSlB = posB.StopLoss;
+                var protectedSlC = posC.StopLoss;
+
+                RestartBot(fx);
+
+                Check(Contains(fx.Bot, "عند التعادل مسبقاً"), "S12: اكتُشف أن B/C عند التعادل بعد إعادة التشغيل");
+                Check(fx.Bot.ModifyCalls.Count == 0, "S12: لا تعديل مكرّر بعد إعادة التشغيل");
+                Check(posB.StopLoss == protectedSlB && posC.StopLoss == protectedSlC, "S12: وقف التعادل محفوظ");
+
+                WriteLog(opts, "scenario_S12_restart_already_protected.log", fx.Bot);
+                summary.Add("S12 restart-already-protected: no repeat modification");
+            }
+
+            // === S13: حدث إغلاق متأخر لـ A بعد إعادة التشغيل ======================
+            {
+                var s = new ExecSettings { Action = "buy", SizeUsd = 15.0, CommissionPerPosition = 0.05 };
+                var fx = BuildExecFixture(s);
+                fx.Bot.TestStart();
+                RaiseBar(fx);
+
+                var posA = PositionByRole(fx, "A");
+                var posB = PositionByRole(fx, "B");
+                var labelA = posA.Label;
+                var entryA = posA.EntryPrice;
+                var tpA = posA.TakeProfit;
+
+                // A يختفي بلا حدث (أُغلق والـcBot متوقف) ثم يُعاد التشغيل.
+                fx.Positions.RemoveForTest(posA);
+                RestartBot(fx);
+                Check(fx.Bot.ModifyCalls.Count == 0, "S13: لا تعديل قبل وصول الحدث المتأخر");
+
+                // الحدث المتأخر يصل بعد إعادة التشغيل (نفس وسم المركز ومعرّفه).
+                var lateA = new Position
+                {
+                    Id = posA.Id,
+                    SymbolName = posA.SymbolName,
+                    TradeType = posA.TradeType,
+                    VolumeInUnits = posA.VolumeInUnits,
+                    EntryPrice = entryA,
+                    TakeProfit = tpA,
+                    Label = labelA,
+                    EntryTime = posA.EntryTime,
+                };
+
+                fx.Symbol.Bid = entryA + 4.5 * fx.Symbol.PipSize;
+                fx.Symbol.Ask = fx.Symbol.Bid + fx.Symbol.PipSize;
+                fx.Positions.CloseForTest(lateA, netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
+
+                Check(fx.Bot.ModifyCalls.Count == 2, $"S13: الحدث المتأخر فعّل الحماية (الفعلي={fx.Bot.ModifyCalls.Count})");
+                Check(posB.StopLoss.GetValueOrDefault() > posB.EntryPrice, "S13: وقف B نُقل للتعادل بعد الحدث المتأخر");
+
+                // حدث مكرّر لنفس المركز المتأخر: لا تعديل إضافي.
+                fx.Positions.CloseForTest(lateA, netProfit: 3.0, reason: PositionCloseReason.TakeProfit);
+                Check(fx.Bot.ModifyCalls.Count == 2, "S13: لا تعديل مكرّر عند تكرار الحدث المتأخر");
+
+                WriteLog(opts, "scenario_S13_delayed_close_event.log", fx.Bot);
+                summary.Add($"S13 delayed-close-after-restart: modifies={fx.Bot.ModifyCalls.Count}");
             }
 
             // ---------------------------------------------------------------------------
