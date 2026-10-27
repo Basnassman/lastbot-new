@@ -1,6 +1,9 @@
 # Keep environment variables out of version control
 .env
 
+# Trade-result audit store (SQLite) — generated at runtime, never committed
+logs/trade_results.sqlite3*
+
 /generated/prisma
 dist
 /generated/prisma

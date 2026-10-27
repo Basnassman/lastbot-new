@@ -88,6 +88,10 @@ class Settings:
     market_structure_recency_bars: int = _get_int("MARKET_STRUCTURE_RECENCY_BARS", 50)
     # الحد الأقصى لعدد مناطق السيولة المحتملة المُعادة (سقف حجم الاستجابة).
     market_structure_max_liquidity_levels: int = _get_int("MARKET_STRUCTURE_MAX_LIQUIDITY_LEVELS", 6)
+    # --- سجل تدقيق نتائج الصفقات (POST /trade-result) — تخزين دائم + منع تكرار ---
+    # ملف SQLite يُنشأ تلقائيًا عند أول نداء؛ يُقدر عبر TRADE_RESULT_DB_PATH.
+    # إعداد جديد اختياري فقط — لا يمس أي إعداد مخاطر أو استراتيجية.
+    trade_result_db_path: str = _get_str("TRADE_RESULT_DB_PATH", "logs/trade_results.sqlite3")
 
 
 settings = Settings()
