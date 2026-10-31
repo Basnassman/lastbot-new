@@ -82,6 +82,7 @@ _engine = DecisionEngine(
 _audit_log = getLogger("brain.api.trade_result")
 _trade_result_store: TradeResultStore | None = None
 _store_lock = threading.Lock()
+_risk_update_lock = threading.Lock()
 
 
 def _get_trade_result_store() -> TradeResultStore:
@@ -143,25 +144,26 @@ def decide_log_only(symbol: str = "XAUUSD", timeframe: str = "M15") -> dict:
 
 @app.post("/trade-result")
 def trade_result(pnl_usd: str, deal_id: str | None = None) -> dict:
-    """يُستدعى من cBot بعد إغلاق كل صفقة لتحديث حساب الخسارة اليومية.
+    """يُستدعى من cBot بعد إغلاق كل صفقة لتحديث صافي نتيجة اليوم (PnL موقّع).
 
-    العقد السابق محفوظ بالكامل: إرسال pnl_usd فقط يكفي، واستجابة النجاح تبقى
-    حرفيًا {"status": "recorded"} (محميّة باختبار موجود). الحقل الاختياري deal_id
-    (dealId القادم من cTrader عبر cBot) يفعّل منع التكرار المدعوم بقاعدة البيانات؛
-    بدونه تُسجَّل النتيجة وتُعالَج مع dedup_applied=0 (توافق عكسي كامل بلا أي تغيير
-    في cBot).
+    PnL موجب يزيد صافي اليوم، وسالب يُنقصه؛ قاطع الخسارة اليومية يعمل على الصافي
+    المحقق فقط. العقد السابق محفوظ بالكامل: إرسال pnl_usd فقط يكفي، واستجابة النجاح
+    تبقى حرفيًا {"status": "recorded"} (محميّة باختبار موجود). الحقل الاختياري
+    deal_id (ClosingDealId/ClosingDeal.Id من cTrader عبر cBot) يفعّل منع التكرار
+    المدعوم بقاعدة البيانات؛ بدونه تُسجَّل النتيجة وتُعالَج مع dedup_applied=0
+    (توافق عكسي بلا ضمان dedup — يُسجَّل تحذير تشغيلي عند كل طلب بلا معرّف).
 
     الاستجابات الموثّقة:
-      200 {"status": "recorded"}       — عولجت وسُجِّلت؛ العداد حُدِّث إلا إذا كان
-                                          pnl موجبًا (تُتجاهله سياسة العداد الحالية)
+      200 {"status": "recorded"}       — عولجت وسُجِّلت؛ صافي اليوم حُدِّث بالقيمة
+                                          الموقّعة (موجب أو سالب)
       200 {"status": "duplicate", ...} — نفس deal_id سبقت معالجتها؛ العداد لم يُحدَّث
                                           مرة ثانية ويُسجَّل محاولة التكرار للتدقيق
       400 {"status": "rejected", ...}  — pnl غير رقمي/غير محدود (NaN/Infinity) أو
                                           deal_id فارغ المساحة
-      500 {"status": "error", ...}     — فشل تحديث العداد بعد ادّعاء صحيح؛ إعادة
-                                          الطلب بنفس deal_id آمنة ولن تُحتسب مرتين
-      503 {"status": "error", ...}     — سجل التدقيق غير متاح/تعذّر تثبيته؛ لا يُمنح
-                                          أي نجاح قبل القبول الدائم
+      500 {"status": "error", ...}     — استثناء أثناء التطبيق؛ مآل العداد ملتبس،
+                                          ولا ينبغي إعادة التطبيق تلقائيًا
+      503 {"status": "error", ...}     — سجل التدقيق غير متاح/تعذّر تثبيته أو السجل
+                                          unresolved؛ يلزم تقرير/مراجعة إدارية
     """
     received_at = datetime.now(timezone.utc).isoformat()
     event_id = uuid4().hex
@@ -185,7 +187,18 @@ def trade_result(pnl_usd: str, deal_id: str | None = None) -> dict:
                                   "deal_id فارغ بعد التنظيف")
             return JSONResponse(status_code=400, content={"status": "rejected", "error": "empty_deal_id"})
 
-    # الخطوة 1+2: ادّعاء ذرّي بمفتاح فريد على مستوى القاعدة قبل أي تحديث للعداد
+    environment = (settings.ctrader_environment or "").strip().lower()
+    if environment not in ("demo", "live"):
+        _audit_log.error("trade-result rejected: cTrader environment is not explicitly demo or live")
+        return JSONResponse(status_code=503, content={"status": "error", "error": "invalid_ctrader_environment"})
+    valid_account_scope = account_scope.isdigit() and int(account_scope) > 0
+    if (environment == "live" or deal_id is not None) and not valid_account_scope:
+        _audit_log.error("trade-result rejected: account scope is missing or invalid")
+        return JSONResponse(status_code=503, content={"status": "error", "error": "invalid_account_scope"})
+    if valid_account_scope:
+        account_scope = str(int(account_scope))  # canonical account key; avoid 00123 vs 123 scopes
+
+    # الخطوة 1+2: ادّعاء ذري بمفتاح فريد على مستوى القاعدة قبل أي تحديث للعداد
     try:
         store = _get_trade_result_store()
         outcome = store.claim(
@@ -197,24 +210,67 @@ def trade_result(pnl_usd: str, deal_id: str | None = None) -> dict:
         return JSONResponse(status_code=503, content={"status": "error", "error": "audit_store_unavailable"})
 
     if not outcome.claimed:
-        return {"status": "duplicate", "deal_id": deal_id, "first_seen_status": outcome.status}
+        if outcome.status == "applied":
+            return {"status": "duplicate", "deal_id": deal_id, "first_seen_status": outcome.status}
+        # سجل قائم غير applied: لا نعد الطلب ناجحاً ولا نعيد تطبيق PnL.
+        return JSONResponse(
+            status_code=503,
+            content={"status": "error", "error": "trade_result_unresolved",
+                     "deal_id": deal_id, "first_seen_status": outcome.status},
+        )
 
+    if deal_id is None:
+        # لا يوجد معرّف إغلاق من العميل: لا يمكن اشتقاق هوية ثابتة داخل Brain،
+        # فكل إعادة إرسال لنفس صفقة الإغلاق ستُطبَّق مرة أخرى على صافي اليوم.
+        # التحذير تشغيلي فقط — لا نرفض الطلب ولا نخترع معرّفًا (قد يضيّع PnL حقيقيًا).
+        _audit_log.warning(
+            "trade-result accepted without deal_id (event %s): dedup_applied=0, "
+            "a retry of the same closing deal cannot be detected and will be applied again",
+            outcome.event_id,
+        )
+
+    # حالة applying دائمة قبل استدعاء المدير لتمييز الحجز السابق عن النافذة الملتبسة.
     try:
-        _risk_manager.register_trade_result(value)
-    except Exception as error:  # noqa: BLE001 — فشل قبل/أثناء تحديث العداد
+        store.mark_applying(outcome.event_id)
+    except Exception as error:  # noqa: BLE001 — لا يمكن أن نثبت أن التطبيق لم يبدأ بعد عطل/تعطل
+        _audit_log.warning("could not persist applying state for event %s: %s", outcome.event_id, type(error).__name__)
+        return JSONResponse(
+            status_code=503,
+            content={"status": "error", "error": "trade_result_unresolved", "deal_id": deal_id},
+        )
+
+    counter_updated = False
+    try:
+        with _risk_update_lock:
+            _risk_manager.register_trade_result(value)
+            counter_updated = True
+    except Exception as error:  # noqa: BLE001 — قد يكون العداد تغير قبل الاستثناء
         try:
-            store.mark_error(outcome.event_id, f"register_trade_result failed: {type(error).__name__}: {error}")
-        except Exception:  # noqa: BLE001 — السجل يبقى claimed؛ تكرار الطلب لاحقًا آمن
+            store.mark_error(outcome.event_id, f"register_trade_result failed: {type(error).__name__}")
+        except Exception:  # noqa: BLE001 — السجل يبقى claimed/applying؛ قد يكون العداد تغير
             _audit_log.warning("could not mark error for event %s", outcome.event_id)
-        return JSONResponse(status_code=500, content={"status": "error", "error": "risk_update_failed"})
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "error": "risk_update_unresolved", "deal_id": deal_id},
+        )
 
     try:
         store.mark_applied(outcome.event_id, datetime.now(timezone.utc).isoformat())
-    except Exception as error:  # noqa: BLE001 — العداد حُدِّث والتثبيت فشل
-        # السجل يبقى claimed: أي إعادة لاحقة لنفس deal_id تُعامل كـ=duplicate
-        # (لا احتساب ثانٍ). لا يُعلَم نجاح لأن مآل المعالجة غير مثبَّت للتدقيق.
-        _audit_log.warning("applied but finalize failed for event %s: %s", outcome.event_id, type(error).__name__)
-        return JSONResponse(status_code=503, content={"status": "error", "error": "audit_finalize_failed"})
+    except Exception as error:  # noqa: BLE001 — نتيجة التثبيت/العداد لا يمكن حسمها
+        if counter_updated:
+            try:
+                store.mark_error(
+                    outcome.event_id,
+                    "finalize failed after risk manager returned",
+                    risk_manager_returned=True,
+                )
+            except Exception:  # noqa: BLE001 — لا نخفي احتمال تحديث العداد
+                _audit_log.warning("could not persist unresolved finalize for event %s", outcome.event_id)
+        _audit_log.warning("finalize unresolved for event %s: %s", outcome.event_id, type(error).__name__)
+        return JSONResponse(
+            status_code=503,
+            content={"status": "error", "error": "trade_result_unresolved", "deal_id": deal_id},
+        )
 
     return {"status": "recorded"}
 

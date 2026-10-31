@@ -20,20 +20,25 @@ class RiskDecision:
 
 class RiskManager:
     def __init__(self) -> None:
-        self._daily_loss_usd: float = 0.0
+        # صافي نتيجة اليوم المحققة بالدولار: موجب = ربح، سالب = خسارة.
+        # ليس مجموع خسائر مطلقة — الأرباح تُخفّض صافي الخسارة كما في المحاسبة الحقيقية.
+        self._daily_net_pnl_usd: float = 0.0
         self._current_day: date = date.today()
 
     def _reset_if_new_day(self) -> None:
         today = date.today()
         if today != self._current_day:
             self._current_day = today
-            self._daily_loss_usd = 0.0
+            self._daily_net_pnl_usd = 0.0
 
     def register_trade_result(self, pnl_usd: float) -> None:
-        """يُستدعى بعد إغلاق كل صفقة لتحديث حساب الخسارة اليومية."""
+        """يُستدعى بعد إغلاق كل صفقة لتحديث صافي نتيجة اليوم.
+
+        القيمة الموقّعة تُجمع كما هي: ربح موجب يزيد الصافي، وخسارة سالبة تُنقصه.
+        أي ربح لاحق يخفّض الخسارة المتراكمة ويُعيد تقييم القاطع في النداء التالي.
+        """
         self._reset_if_new_day()
-        if pnl_usd < 0:
-            self._daily_loss_usd += abs(pnl_usd)
+        self._daily_net_pnl_usd += pnl_usd
 
     def evaluate(self, confidence: float, atr_value: float) -> RiskDecision:
         """
@@ -43,13 +48,15 @@ class RiskManager:
         self._reset_if_new_day()
 
         max_daily_loss_usd = settings.account_balance_usd * (settings.max_daily_loss_percent / 100.0)
-        if self._daily_loss_usd >= max_daily_loss_usd:
+        # القاطع يعمل على الصافي المحقق فقط: يُفعَّل عندما يصل الصافي أو ينزل
+        # إلى سالب حد الخسارة اليومية (أي net <= -limit)، لا عند مجرد تراكم خسائر.
+        if self._daily_net_pnl_usd <= -max_daily_loss_usd:
             return RiskDecision(
                 approved=False,
                 position_size_usd=0.0,
                 reason=(
-                    f"قاطع الدائرة فعّال: الخسارة اليومية ${self._daily_loss_usd:.2f} "
-                    f"وصلت/تجاوزت الحد الأقصى ${max_daily_loss_usd:.2f}"
+                    f"قاطع الدائرة فعّال: صافي نتيجة اليوم ${self._daily_net_pnl_usd:.2f} "
+                    f"وصل/تجاوز حد الخسارة اليومية ${max_daily_loss_usd:.2f}"
                 ),
             )
 

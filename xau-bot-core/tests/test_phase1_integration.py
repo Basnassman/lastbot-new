@@ -204,7 +204,7 @@ def test_trade_result_endpoint_still_records(monkeypatch):
     response = client.post("/trade-result", params={"pnl_usd": -12.5})
     assert response.status_code == 200
     assert response.json() == {"status": "recorded"}
-    assert fresh._daily_loss_usd == pytest.approx(12.5)  # الخسارة اليومية تحدّثت فعلاً
+    assert fresh._daily_net_pnl_usd == pytest.approx(-12.5)  # صافي اليوم الموقّع تحدّث فعلاً
 
 
 # ---------------------------------------------------------------------------

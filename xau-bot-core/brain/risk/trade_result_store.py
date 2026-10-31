@@ -7,17 +7,12 @@
   وsynchronous=FULL لضمان قبول دائم قبل أي معالجة لاحقة.
 - منع التكرار: فهرس UNIQUE على (account_scope, deal_id) مع ادّعاء ذرّي
   (BEGIN IMMEDIATE + INSERT) — طلبان متزامنان لنفس المعرّف لا ينجح منهما إلا واحد.
-- دورة الحياة للسجل: claimed → applied | error | orphaned | rejected.
-  * claimed: ادُّعِي المفتاح ولم يُحدَّث عداد المخاطر بعد (أو فشل الت_finalize).
-  * applied: العداد حُدِّث فعليًا (risk_manager_updated=1).
-  * error: تحديث العداد فشل (يعاد المحاولة عند تكرار الطلب — آمن لأن الفشل سابق
-    على أي تعديل؛ عداد المخاطر يُحدَّث بعملية ذرّية واحدة لا يقع فيها استثناء
-    بعد التعديل).
-  * orphaned: سجل claimed قديم أُعلن منقطعًا عند إقلاع العملية (تجاوز حدّ سماح)
-    — لا يُعاد تطبيقه تلقائيًا (انظر التوثيق أدناه).
-- الحد الفاقد للتعافي (crash window) موثّق في end module docstring: الحالة المخزَّنة
-  والعداد في الذاكرة غير معاملتان معاملة transactional واحدة، لذا لا يُدعى
-  exactly-once عبر أعطال العملية؛ الفشل الآمن مُتحاز نحو عدم الاحتساب المزدوج.
+- الحالات: claimed (حجز دائم، التطبيق لم يبدأ)، applying (على وشك استدعاء مدير المخاطر)،
+  applied (استدعاء المدير عاد دون استثناء)، error (استثناء أثناء التطبيق والنتيجة ملتبسة)،
+  orphaned (تصنيف إداري فقط)، rejected. تبقى الحالات غير المحسومة كما هي بعد إعادة التشغيل؛
+  لا يُعاد تطبيق PnL منها تلقائيًا لأن السجل لا يثبت حالة عداد الذاكرة.
+- حالة SQLite وعدّاد RiskManager في الذاكرة غير معاملتين ذريتين؛ لا يُدعى exactly-once
+  عبر الأعطال/إعادة التشغيل. نفضّل حجب إعادة التطبيق التلقائي على خطر الاحتساب المزدوج.
 
 هذه الوحدة لا تستورد أي من إعدادات المخاطر ولا تغيّرها؛ مسار الملف يأتي من
 config.settings.trade_result_db_path (إعداد جديد اختياري بقيمة افتراضية آمنة).
@@ -25,7 +20,7 @@ config.settings.trade_result_db_path (إعداد جديد اختياري بقي�
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 # حالات السجل — قيم مستندة إلى متطلبات التدقيق (processed/duplicate/rejected/error)
@@ -34,11 +29,6 @@ STATUS_APPLIED = "applied"
 STATUS_ERROR = "error"
 STATUS_ORPHANED = "orphaned"
 STATUS_REJECTED = "rejected"
-
-# حدّ السماح: أي claimed أقدم من هذا العمر عند إقلاع العملية يُعلن منقطعًا.
-# يحمي ادّعاءات العمليات الشقيقة الحيّة (workers متعددة على نفس الملف).
-_DEFAULT_ORPHAN_GRACE_SECONDS = 600.0
-
 
 @dataclass(frozen=True)
 class ClaimOutcome:
@@ -54,12 +44,10 @@ class ClaimOutcome:
 class TradeResultStore:
     """متجر تدقيق + منع تكرار لنتائج الصفقات (SQLite، متعدد الخيوط/العمليات آمن)."""
 
-    def __init__(self, db_path: str | Path, orphan_grace_seconds: float = _DEFAULT_ORPHAN_GRACE_SECONDS) -> None:
+    def __init__(self, db_path: str | Path) -> None:
         self._db_path = str(db_path)
-        self._orphan_grace = float(orphan_grace_seconds)
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
-        self._mark_stale_claims_orphaned()
 
     # ------------------------------------------------------------------ internal
 
@@ -93,27 +81,6 @@ class TradeResultStore:
                 """
             )
 
-    def _mark_stale_claims_orphaned(self) -> None:
-        """_recovery عند الإقلاع: ادّعاءات claimed متجاوزة حدّ السماح تُعلن منقطعًا.
-
-        لا تُعاد تطبيقها تلقائيًا — إعادة التطبيق قد تغيّر سلوك حد الخسارة اليومي
-        خارج نطاق هذه المهمة؛ التوثيق يوجب الإبلاغ بدل التخمين. (الافتراض: أي
-        claimed أحدث من العمر المسموح يعود إلى عملية أخرى شغّالة على نفس الملف.)
-        """
-        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=self._orphan_grace)).isoformat()
-        with closing(self._connect()) as connection:
-            connection.execute(
-                """
-                UPDATE trade_results
-                   SET status = ?,
-                       error_detail = COALESCE(error_detail || ' | ', '')
-                                     || 'interrupted_before_finalize_or_apply'
-                 WHERE status = ? AND received_at_utc < ?
-                """,
-                (STATUS_ORPHANED, STATUS_CLAIMED, cutoff),
-            )
-            connection.commit()
-
     # ------------------------------------------------------------------ public
 
     def claim(
@@ -128,11 +95,12 @@ class TradeResultStore:
         """ادّعاء ذرّي للنتيجة قبل تطبيقها على RiskManager.
 
         - مع deal_id: فهرس UNIQUE يضمن أن طلبًا واحدًا فقط ينجح بالادّعاء؛
-          التكرار (حتى المتزامن) يُعاد كـduplicate دون تطبيق ثانٍ.
+          أي duplicate لا يعيد التطبيق؛ الحالات غير applied تبقى unresolved.
         - بلا deal_id (وضع متوافق عكسي): كل طلب يُسجَّل ويعالَج (بدون dedup)
           وdedup_applied=0 ليكون غياب الحماية موثّقًا لا مخفيًا.
-        - تكرار سجل status=error يُسمح بإعادة الادّعاء: الفشل سابق على تعديل العداد.
-        - تكرار سجل applied | claimed | orphaned = duplicate دائم (لا احتساب ثانٍ).
+        - تكرار أي سجل قائم، بما فيه error/claimed/applying/orphaned، لا يعيد التطبيق؛
+          لا يثبت استثناء التطبيق أن العداد لم يتغير.
+        - deal_id مفقود يبقى متوافقًا لكنه لا يملك ضمان dedup.
         """
         connection = self._connect()
         try:
@@ -154,63 +122,67 @@ class TradeResultStore:
                 return ClaimOutcome(True, False, STATUS_CLAIMED, event_id)
             except sqlite3.IntegrityError:
                 # المفتاح موجود مسبقًا — سجل محاولة التكرار ثم قرّر الحالة
+                if not deal_id:
+                    raise
                 row = connection.execute(
-                    "SELECT event_id, status FROM trade_results WHERE account_scope = ? AND deal_id = ?",
-                    (account_scope, deal_id),
+                    "SELECT event_id, status FROM trade_results"
+                    " WHERE account_scope = ? AND deal_id = ? AND status <> ?",
+                    (account_scope, deal_id, STATUS_REJECTED),
                 ).fetchone()
                 connection.execute(
                     """
                     UPDATE trade_results
                        SET duplicate_attempts = duplicate_attempts + 1,
                            last_duplicate_at_utc = ?
-                     WHERE account_scope = ? AND deal_id = ?
+                     WHERE account_scope = ? AND deal_id = ? AND status <> ?
                     """,
-                    (received_at_utc, account_scope, deal_id),
+                    (received_at_utc, account_scope, deal_id, STATUS_REJECTED),
                 )
                 original_event, status = row if row else ("", "unknown")
-                if status == STATUS_ERROR:
-                    # إعادة الادّعاء لسجل الفاشل — آمنة لأن الفشل سابق على تحديث العداد.
-                    # شرط status='error' يضمن أن مطالبًا واحدًا فقط ينجح (.rowcount).
-                    cursor = connection.execute(
-                        """
-                        UPDATE trade_results
-                           SET status = ?, risk_manager_updated = 0,
-                               error_detail = COALESCE(error_detail || ' | ', '') || 'retry_claimed'
-                         WHERE account_scope = ? AND deal_id = ? AND status = ?
-                        """,
-                        (STATUS_CLAIMED, account_scope, deal_id, STATUS_ERROR),
-                    )
-                    connection.commit()
-                    if cursor.rowcount == 1:
-                        return ClaimOutcome(True, False, STATUS_CLAIMED, original_event, "retry_after_error")
-                    return ClaimOutcome(False, True, STATUS_CLAIMED, original_event, "duplicate_of_claimed")
                 connection.commit()
                 return ClaimOutcome(False, True, status, original_event, "duplicate_of_" + status)
         finally:
             connection.close()
 
     def mark_applied(self, event_id: str, applied_at_utc: str) -> None:
-        """تثبيت نجاح تحديث العداد — يُستدعى بعد register_trade_result مباشرة."""
+        """تثبيت نجاح عودة register_trade_result؛ لا يجعل العداد وSQLite معاملة واحدة."""
         with closing(self._connect()) as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
                 UPDATE trade_results
                    SET status = ?, risk_manager_updated = 1,
                        error_detail = COALESCE(error_detail || ' | ', '')
                                      || ('applied_at=' || ?)
-                 WHERE event_id = ?
+                 WHERE event_id = ? AND status = 'applying'
                 """,
                 (STATUS_APPLIED, applied_at_utc, event_id),
             )
+            if cursor.rowcount != 1:
+                raise RuntimeError("trade result was not in applying state during finalize")
             connection.commit()
 
-    def mark_error(self, event_id: str, detail: str) -> None:
-        """تثبيت فشل تحديث العداد — يسمح بإعادة المحاولة الآمنة عند تكرار الطلب."""
+    def mark_applying(self, event_id: str) -> None:
+        """يسجل قبل استدعاء المدير أن التطبيق على وشك البدء؛ لا يضمن اكتماله."""
         with closing(self._connect()) as connection:
-            connection.execute(
-                "UPDATE trade_results SET status = ?, error_detail = ? WHERE event_id = ?",
-                (STATUS_ERROR, detail[:500], event_id),
+            cursor = connection.execute(
+                "UPDATE trade_results SET status = 'applying' WHERE event_id = ? AND status = ?",
+                (event_id, STATUS_CLAIMED),
             )
+            if cursor.rowcount != 1:
+                raise RuntimeError("trade result was not claimed before risk update")
+            connection.commit()
+
+    def mark_error(self, event_id: str, detail: str, *, risk_manager_returned: bool = False) -> None:
+        """يسجل حالة غير محسومة؛ العلامة توضح فقط عودة استدعاء المدير دون استثناء."""
+        with closing(self._connect()) as connection:
+            cursor = connection.execute(
+                "UPDATE trade_results SET status = ?,"
+                " risk_manager_updated = CASE WHEN ? THEN 1 ELSE risk_manager_updated END,"
+                " error_detail = ? WHERE event_id = ? AND status = 'applying'",
+                (STATUS_ERROR, int(risk_manager_returned), detail[:500], event_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("trade result was not applying while recording application error")
             connection.commit()
 
     def record_rejected(
@@ -234,7 +206,8 @@ class TradeResultStore:
                 VALUES (?, ?, ?, 0.0, ?, ?, 0, ?)
                 """,
                 (event_id, (deal_id or "<invalid>").strip()[:200], account_scope,
-                 received_at_utc, STATUS_REJECTED, f"{detail} | raw_pnl={raw_pnl[:100]!r}"),
+                 received_at_utc, STATUS_REJECTED,
+                 f"{detail} | raw_pnl_length={len(raw_pnl)}"),
             )
             connection.commit()
         finally:
@@ -254,3 +227,25 @@ class TradeResultStore:
             "last_duplicate_at_utc",
         ]
         return [dict(zip(columns, row)) for row in rows]
+
+    def fetch_unresolved(self) -> list[dict]:
+        """قراءة السجلات غير المحسومة فقط؛ لا تُعد تطبيق PnL ولا تغيّر الحالة."""
+        return [
+            row for row in self.fetch_all()
+            if            row["status"] in (STATUS_CLAIMED, "applying", STATUS_ERROR, STATUS_ORPHANED)
+        ]
+
+    @staticmethod
+    def read_unresolved(db_path: str | Path) -> list[dict]:
+        """استعلام SQLite للقراءة فقط؛ لا ينشئ الملف/المخطط ولا يغيّر حالة stale claims."""
+        uri = Path(db_path).resolve().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                "SELECT event_id, deal_id, account_scope, pnl_usd, received_at_utc, status,"
+                " dedup_applied, risk_manager_updated, error_detail,"
+                " duplicate_attempts, last_duplicate_at_utc FROM trade_results"
+                " WHERE status IN (?, ?, ?, ?) ORDER BY received_at_utc, event_id",
+                (STATUS_CLAIMED, "applying", STATUS_ERROR, STATUS_ORPHANED),
+            ).fetchall()
+        return [dict(row) for row in rows]
