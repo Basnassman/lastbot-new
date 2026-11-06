@@ -1,8 +1,12 @@
 {
   "version": 2,
-  "dgSpecHash": "96fGw8QRRFc=",
+  "dgSpecHash": "IykWYF/bgsg=",
   "success": true,
-  "projectFilePath": "/home/ebrahim/p/newbotgood/executor/harness/ExecutorHarness/ExecutorHarness.csproj",
-  "expectedPackageFiles": [],
+  "projectFilePath": "/workspaces/lastbot-new/executor/harness/ExecutorHarness/ExecutorHarness.csproj",
+  "expectedPackageFiles": [
+    "/home/codespace/.nuget/packages/microsoft.netcore.app.ref/8.0.33/microsoft.netcore.app.ref.8.0.33.nupkg.sha512",
+    "/home/codespace/.nuget/packages/microsoft.aspnetcore.app.ref/8.0.33/microsoft.aspnetcore.app.ref.8.0.33.nupkg.sha512",
+    "/home/codespace/.nuget/packages/microsoft.netcore.app.host.linux-x64/8.0.33/microsoft.netcore.app.host.linux-x64.8.0.33.nupkg.sha512"
+  ],
   "logs": []
 }

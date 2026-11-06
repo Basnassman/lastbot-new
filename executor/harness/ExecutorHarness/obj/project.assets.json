@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "targets": {
     "net8.0": {
       "cAlgo.API/1.0.0": {
@@ -27,19 +27,19 @@
     ]
   },
   "packageFolders": {
-    "/home/ebrahim/.nuget/packages/": {}
+    "/home/codespace/.nuget/packages/": {}
   },
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "/home/ebrahim/p/newbotgood/executor/harness/ExecutorHarness/ExecutorHarness.csproj",
+      "projectUniqueName": "/workspaces/lastbot-new/executor/harness/ExecutorHarness/ExecutorHarness.csproj",
       "projectName": "ExecutorHarness",
-      "projectPath": "/home/ebrahim/p/newbotgood/executor/harness/ExecutorHarness/ExecutorHarness.csproj",
-      "packagesPath": "/home/ebrahim/.nuget/packages/",
-      "outputPath": "/home/ebrahim/p/newbotgood/executor/harness/ExecutorHarness/obj/",
+      "projectPath": "/workspaces/lastbot-new/executor/harness/ExecutorHarness/ExecutorHarness.csproj",
+      "packagesPath": "/home/codespace/.nuget/packages/",
+      "outputPath": "/workspaces/lastbot-new/executor/harness/ExecutorHarness/obj/",
       "projectStyle": "PackageReference",
       "configFilePaths": [
-        "/home/ebrahim/.nuget/NuGet/NuGet.Config"
+        "/home/codespace/.nuget/NuGet/NuGet.Config"
       ],
       "originalTargetFrameworks": [
         "net8.0"
@@ -49,10 +49,11 @@
       },
       "frameworks": {
         "net8.0": {
+          "framework": "net8.0",
           "targetAlias": "net8.0",
           "projectReferences": {
-            "/home/ebrahim/p/newbotgood/executor/harness/CAlgoApiShim/CAlgoApiShim.csproj": {
-              "projectPath": "/home/ebrahim/p/newbotgood/executor/harness/CAlgoApiShim/CAlgoApiShim.csproj"
+            "/workspaces/lastbot-new/executor/harness/CAlgoApiShim/CAlgoApiShim.csproj": {
+              "projectPath": "/workspaces/lastbot-new/executor/harness/CAlgoApiShim/CAlgoApiShim.csproj"
             }
           }
         }
@@ -66,10 +67,12 @@
         "enableAudit": "true",
         "auditLevel": "low",
         "auditMode": "direct"
-      }
+      },
+      "SdkAnalysisLevel": "10.0.400"
     },
     "frameworks": {
       "net8.0": {
+        "framework": "net8.0",
         "targetAlias": "net8.0",
         "imports": [
           "net461",
@@ -82,12 +85,26 @@
         ],
         "assetTargetFallback": true,
         "warn": true,
+        "downloadDependencies": [
+          {
+            "name": "Microsoft.AspNetCore.App.Ref",
+            "version": "[8.0.33, 8.0.33]"
+          },
+          {
+            "name": "Microsoft.NETCore.App.Host.linux-x64",
+            "version": "[8.0.33, 8.0.33]"
+          },
+          {
+            "name": "Microsoft.NETCore.App.Ref",
+            "version": "[8.0.33, 8.0.33]"
+          }
+        ],
         "frameworkReferences": {
           "Microsoft.NETCore.App": {
             "privateAssets": "all"
           }
         },
-        "runtimeIdentifierGraphPath": "/home/ebrahim/.dotnet/sdk/8.0.425/PortableRuntimeIdentifierGraph.json"
+        "runtimeIdentifierGraphPath": "/usr/share/dotnet/sdk/10.0.403/PortableRuntimeIdentifierGraph.json"
       }
     }
   }
