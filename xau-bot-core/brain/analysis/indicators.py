@@ -25,14 +25,27 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
         raise ValueError(f"period must be >= 1, got {period}")
 
     try:
-        values = pd.Series(series, dtype="float64")
-    except (TypeError, ValueError) as exc:
-        # pd.NA داخل object يرفع TypeError، والنصوص ترفع ValueError — كلاهما
-        # يُترجم إلى ValueError صريح بدل تسريب TypeError أو تحويل صامت لقيمة.
+        raw_values = pd.Series(series)
+        # Reject text explicitly, including numeric-looking strings. RSI prices
+        # must arrive as numeric data rather than being silently coerced.
+        if raw_values.map(lambda value: isinstance(value, str)).any():
+            raise ValueError("RSI input contains string values")
+        if pd.api.types.is_object_dtype(raw_values.dtype) and raw_values.map(
+            lambda value: value is pd.NA
+        ).any():
+            # Preserve the explicit cause for pd.NA in legacy object arrays.
+            raise TypeError("RSI input contains pd.NA in an object array")
+        numeric_values = pd.to_numeric(raw_values, errors="raise")
+        if pd.api.types.is_complex_dtype(numeric_values.dtype):
+            raise ValueError("RSI input must contain real numbers, not complex values")
+        values = numeric_values.astype("float64")
+    except (TypeError, ValueError, OverflowError) as exc:
+        # Normalize malformed input (including pd.NA in object/nullable arrays)
+        # to one deliberate public exception; never substitute a numeric value.
         raise ValueError(
-            "RSI input must be numeric: strings, pd.NA, NaN and Infinity are rejected"
+            "RSI input must be numeric real data without strings or missing values"
         ) from exc
-    if not np.isfinite(values.to_numpy()).all():
+    if not np.isfinite(values.to_numpy(dtype="float64")).all():
         raise ValueError("RSI input contains non-finite values (NaN or Infinity)")
 
     delta = values.diff()
