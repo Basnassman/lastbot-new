@@ -11,14 +11,44 @@ def ema(series: pd.Series, period: int) -> pd.Series:
 
 
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta = series.diff()
+    """RSI بطريقة EWM الحالية (alpha=1/period, adjust=False).
+
+    - قبل اكتمال ``period`` من التغيرات تُعاد NaN (لا قيم مُصنّعة).
+    - متوسط خسارة صفري مع مكاسب موجبة يعطي 100، والعكس يعطي 0،
+      وصفر في الاثنين يعطي 50.
+    - أي NaN أو Infinity في المدخلات يُرفض بخطأ صريح.
+    """
+    if isinstance(period, bool) or not isinstance(period, (int, np.integer)):
+        raise TypeError(f"period must be an integer, got {type(period).__name__}")
+    period = int(period)
+    if period < 1:
+        raise ValueError(f"period must be >= 1, got {period}")
+
+    values = pd.Series(series, dtype="float64")
+    if not np.isfinite(values.to_numpy()).all():
+        raise ValueError("RSI input contains non-finite values (NaN or Infinity)")
+
+    delta = values.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    result = 100 - (100 / (1 + rs))
-    return result.fillna(50)  # قيمة محايدة إذا لم تتوفر بيانات كافية
+    avg_gain = gain.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    avg_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+
+    ag = avg_gain.to_numpy(dtype="float64")
+    al = avg_loss.to_numpy(dtype="float64")
+    result = np.full(len(values), np.nan, dtype="float64")
+
+    available = np.isfinite(ag) & np.isfinite(al)
+    both_zero = available & (ag == 0) & (al == 0)
+    zero_loss = available & (ag > 0) & (al == 0)
+    zero_gain = available & (ag == 0) & (al > 0)
+    normal = available & ~(both_zero | zero_loss | zero_gain)
+
+    result[zero_loss] = 100.0
+    result[zero_gain] = 0.0
+    result[both_zero] = 50.0
+    result[normal] = 100 - (100 / (1 + ag[normal] / al[normal]))
+    return pd.Series(result, index=values.index, name=values.name)
 
 
 def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:

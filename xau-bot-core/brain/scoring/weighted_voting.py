@@ -9,6 +9,7 @@
 النتيجة النهائية = متوسط مرجّح لكل المكونات.
 القرار (شراء/بيع/لا شيء) يعتمد على تجاوز |النتيجة| لعتبة معينة.
 """
+import math
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -44,7 +45,20 @@ def _trend_component(candles: pd.DataFrame, regime: RegimeResult) -> tuple[float
 
 
 def _momentum_component(candles: pd.DataFrame) -> tuple[float, str]:
-    current_rsi = rsi(candles["close"]).iloc[-1]
+    """مكوّن الزخم من RSI.
+
+    إذا كان RSI غير متاح (تاريخ غير كافٍ أو بيانات غير صالحة) يُستبعد المكوّن
+    من التصويت بمساهمة 0.0، دون تصنيع قيمة RSI بديلة، وتبقى بقية المكوّنات
+    والأوزان والعتبات كما هي.
+    """
+    if "close" not in candles.columns or len(candles) == 0:
+        return 0.0, "RSI غير متاح (لا توجد أسعار إغلاق) — استُبعد مكوّن الزخم من التصويت"
+    try:
+        current_rsi = float(rsi(candles["close"]).iloc[-1])
+    except ValueError:
+        return 0.0, "RSI غير متاح (بيانات غير صالحة) — استُبعد مكوّن الزخم من التصويت"
+    if not math.isfinite(current_rsi):
+        return 0.0, "RSI غير متاح (تاريخ غير كافٍ) — استُبعد مكوّن الزخم من التصويت"
     if current_rsi >= 70:
         return -60.0, f"RSI متشبع شراء ({current_rsi:.1f}) — احتمال ارتداد هابط"
     if current_rsi <= 30:
