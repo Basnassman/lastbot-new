@@ -24,7 +24,14 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     if period < 1:
         raise ValueError(f"period must be >= 1, got {period}")
 
-    values = pd.Series(series, dtype="float64")
+    try:
+        values = pd.Series(series, dtype="float64")
+    except (TypeError, ValueError) as exc:
+        # pd.NA داخل object يرفع TypeError، والنصوص ترفع ValueError — كلاهما
+        # يُترجم إلى ValueError صريح بدل تسريب TypeError أو تحويل صامت لقيمة.
+        raise ValueError(
+            "RSI input must be numeric: strings, pd.NA, NaN and Infinity are rejected"
+        ) from exc
     if not np.isfinite(values.to_numpy()).all():
         raise ValueError("RSI input contains non-finite values (NaN or Infinity)")
 

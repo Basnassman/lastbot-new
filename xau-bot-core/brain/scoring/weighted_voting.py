@@ -55,8 +55,13 @@ def _momentum_component(candles: pd.DataFrame) -> tuple[float, str]:
         return 0.0, "RSI غير متاح (لا توجد أسعار إغلاق) — استُبعد مكوّن الزخم من التصويت"
     try:
         current_rsi = float(rsi(candles["close"]).iloc[-1])
-    except ValueError:
-        return 0.0, "RSI غير متاح (بيانات غير صالحة) — استُبعد مكوّن الزخم من التصويت"
+    except (TypeError, ValueError):
+        # فقط أخطاء التحقق من صحة إدخال RSI: أسعار غير رقمية أو pd.NA/NaN/Infinity.
+        return (
+            0.0,
+            "RSI غير متاح (بيانات غير صالحة في الإدخال: أسعار إغلاق غير رقمية "
+            "أو غير منتهية) — استُبعد مكوّن الزخم من التصويت",
+        )
     if not math.isfinite(current_rsi):
         return 0.0, "RSI غير متاح (تاريخ غير كافٍ) — استُبعد مكوّن الزخم من التصويت"
     if current_rsi >= 70:

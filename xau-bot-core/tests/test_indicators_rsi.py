@@ -11,7 +11,7 @@ import pytest
 
 from brain.analysis.indicators import rsi
 from brain.analysis.regime_detector import RegimeResult
-from brain.scoring.weighted_voting import compute_score
+from brain.scoring.weighted_voting import _momentum_component, compute_score
 from config.settings import settings
 
 # سلسلة Wilder الكلاسيكية (15 سعراً = 14 تغيراً، أي تاريخ كافٍ تماماً).
@@ -148,6 +148,64 @@ def test_infinite_input_is_rejected(bad, position):
         rsi(pd.Series(close))
 
 
+# --- المرحلة 4C: تحويل المدخلات غير الرقمية --------------------------------
+
+
+def _malformed_close_series():
+    """كل صور الإدخال السيئة التي كانت تسرّب TypeError أو تُحوّل صامتاً."""
+    return [
+        pd.Series(["x", "y"] * 8),  # نصوص
+        pd.Series([1.0, pd.NA] * 8, dtype="object"),  # pd.NA داخل object
+        pd.Series([1.0, pd.NA] * 8, dtype="Float64"),  # pd.NA داخل Float64
+        pd.Series([1.0, np.nan] * 8),  # NaN
+        pd.Series([1.0, np.inf] * 8),  # +Infinity
+        pd.Series([1.0, -np.inf] * 8),  # -Infinity
+    ]
+
+
+def test_string_prices_raise_value_error_not_type_error():
+    with pytest.raises(ValueError, match="must be numeric"):
+        rsi(pd.Series(["x", "y"] * 8))
+
+
+def test_object_series_with_pd_na_raises_value_error_not_type_error():
+    with pytest.raises(ValueError, match="must be numeric"):
+        rsi(pd.Series([1.0, pd.NA] * 8, dtype="object"))
+
+
+def test_nullable_float64_with_pd_na_is_rejected():
+    with pytest.raises(ValueError, match="non-finite"):
+        rsi(pd.Series([1.0, pd.NA] * 8, dtype="Float64"))
+
+
+@pytest.mark.parametrize("index", range(6))
+def test_every_malformed_input_raises_value_error_only(index):
+    """لا TypeError سائب، ولا تحويل صامت إلى صفر أو سعر مُصنّع."""
+    series = _malformed_close_series()[index]
+    with pytest.raises(ValueError):
+        rsi(series)
+
+
+def test_malformed_input_error_chains_the_original_cause():
+    with pytest.raises(ValueError) as excinfo:
+        rsi(pd.Series([1.0, pd.NA] * 8, dtype="object"))
+    assert isinstance(excinfo.value.__cause__, TypeError)
+
+
+def test_empty_series_still_returns_empty_result():
+    result = rsi(pd.Series([], dtype="float64"))
+    assert len(result) == 0
+    assert result.isna().all()
+
+
+def test_valid_series_preserves_index_and_name():
+    source = pd.Series(SEED7, index=[f"t{i}" for i in range(len(SEED7))], name="close")
+    result = rsi(source)
+    assert result.name == "close"
+    assert list(result.index) == list(source.index)
+    assert result.iloc[14] == pytest.approx(SEED7_RSI_14[0], abs=1e-12)
+
+
 @pytest.mark.parametrize("period", [True, False, 14.0, np.float64(14.0), "14", None])
 def test_non_integer_period_is_rejected(period):
     with pytest.raises(TypeError, match="period must be an integer"):
@@ -258,6 +316,45 @@ def test_missing_or_empty_close_excludes_momentum_without_crashing():
     )
     assert no_close.momentum_score == 0.0
     assert "لا توجد أسعار إغلاق" in no_close.reasons[1]
+
+
+# --- المرحلة 4C: وزن الزخم مع إدخال غير صالح -------------------------------
+
+
+@pytest.mark.parametrize("index", range(6))
+def test_momentum_component_returns_zero_for_malformed_close(index):
+    close = _malformed_close_series()[index]
+    score, reason = _momentum_component(pd.DataFrame({"close": close}))
+    assert score == 0.0
+    assert "غير متاح" in reason
+    assert "بيانات غير صالحة" in reason
+    assert "الإدخال" in reason
+
+
+def test_momentum_component_insufficient_history_still_returns_zero():
+    score, reason = _momentum_component(pd.DataFrame({"close": [100.0, 101.0, 102.0]}))
+    assert score == 0.0
+    assert "تاريخ غير كافٍ" in reason
+
+
+def test_momentum_component_valid_input_unchanged():
+    score, reason = _momentum_component(pd.DataFrame({"close": CLASSIC}))
+    expected = (50.65741494172488 - 50.0) * 1.2
+    assert score == pytest.approx(expected, abs=1e-9)
+    assert "محايد" in reason
+
+
+def test_malformed_close_cannot_crash_full_scoring():
+    result = compute_score(
+        pd.DataFrame({"close": pd.Series([1.0, pd.NA] * 8, dtype="object")}),
+        RegimeResult(regime="trend_up", slope_value=10.0),
+        dollar_trend="down",
+    )
+    assert result.momentum_score == 0.0
+    assert "بيانات غير صالحة" in result.reasons[1]
+    # الأوزان دون إعادة توزيع: (100*45 + 0*30 + 70*25)/100
+    assert result.final_score == pytest.approx(62.5, abs=1e-12)
+    assert result.direction == _expected_direction(62.5)
 
 
 # --- weighted_voting: RSI صالح ---------------------------------------------
