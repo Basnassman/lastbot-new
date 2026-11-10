@@ -30,6 +30,7 @@ ema_slope(lookback=10) المستخدمة في كشف النظام (regime_detec
 لا قيمة افتراضية صامتة أبداً — محرك القرار لا يجوز أن يصوّت على اتجاه دولار
 غير محسوب فعلياً.
 """
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -133,21 +134,54 @@ class RealCorrelationFeed(CorrelationFeed):
     # --- الداخلية ---
 
     def _fetch_current_and_previous_prices(self) -> tuple[dict[str, float], dict[str, float]]:
-        """يجلب إغلاقات الأزواج الستة ويعيد (أسعار النقطة الحالية، أسعار نقطة N شمعة مضت)."""
-        needed = self.lookback + 1  # النقطة الحالية + نقطة المقارنة قبل N شمعة
-        current: dict[str, float] = {}
-        previous: dict[str, float] = {}
+        """يجلب نافذة مشتركة زمنياً للأزواج الستة، ثم يعيد نقطتي المقارنة."""
+        needed = self.lookback + 1
+        pair_candles: dict[str, dict[pd.Timestamp, float]] = {}
+        latest_by_pair: dict[str, pd.Timestamp] = {}
 
         for symbol in _DXY_COMPONENTS:
-            closes = self._fetch_pair_closes(symbol, needed + _FETCH_BUFFER)
-            previous[symbol] = closes[0]        # شمعة قبل N شمعة (أقدم شمعة في النافذة)
-            current[symbol] = closes[-1]        # آخر شمعة متاحة
+            rows = self._fetch_pair_closes(symbol, needed + _FETCH_BUFFER)
+            pair_candles[symbol] = dict(rows)
+            latest_by_pair[symbol] = rows[-1][0]
 
+        if len(set(latest_by_pair.values())) != 1:
+            details = ", ".join(
+                f"{symbol}={timestamp.isoformat()}"
+                for symbol, timestamp in latest_by_pair.items()
+            )
+            raise CorrelationFeedError(f"توقيت آخر شمعة غير متزامن بين أزواج DXY: {details}")
+
+        common_times = set.intersection(*(set(rows) for rows in pair_candles.values()))
+        ordered_times = sorted(common_times)
+        if len(ordered_times) < needed:
+            raise CorrelationFeedError(
+                f"لا توجد {needed} شموع مشتركة زمنياً بين الأزواج الستة؛ "
+                f"المتاح {len(ordered_times)} فقط"
+            )
+
+        selected_times = ordered_times[-needed:]
+        window_start, window_end = selected_times[0], selected_times[-1]
+        window_union = set().union(
+            *(set(rows) for rows in pair_candles.values())
+        )
+        partial_times = sorted(
+            timestamp for timestamp in window_union
+            if window_start <= timestamp <= window_end and timestamp not in common_times
+        )
+        if partial_times:
+            raise CorrelationFeedError(
+                "توجد شموع ضمن نافذة DXY غير متوفرة لدى جميع الأزواج؛ "
+                f"أول توقيت غير مشترك: {partial_times[0].isoformat()}"
+            )
+
+        current = {symbol: rows[selected_times[-1]] for symbol, rows in pair_candles.items()}
+        previous = {symbol: rows[selected_times[0]] for symbol, rows in pair_candles.items()}
         return current, previous
 
-    def _fetch_pair_closes(self, symbol: str, fetch_count: int) -> list[float]:
-        """يجلب إغلاقات زوج واحد (بفائض جلب) ويقصّها إلى آخر lookback+1 شمعة مغلقة."""
-        needed = self.lookback + 1
+    def _fetch_pair_closes(
+        self, symbol: str, fetch_count: int
+    ) -> list[tuple[pd.Timestamp, float]]:
+        """يجلب (التوقيت UTC، الإغلاق) ويتحقق من سلامة وتسلسل شموع زوج واحد."""
         try:
             candles = self._price_feed.get_candles(symbol, self.timeframe, fetch_count)
         except Exception as error:
@@ -156,26 +190,52 @@ class RealCorrelationFeed(CorrelationFeed):
                 f"لازم حساب DXY: {error}"
             ) from error
 
-        if candles is None or candles.empty:
+        if candles is None or not isinstance(candles, pd.DataFrame) or candles.empty:
             raise CorrelationFeedError(
-                f"لم تُعَد أي شموع للزوج {symbol} على الإطار {self.timeframe} — "
-                "لا يمكن حساب DXY بدون الأزواج الستة كاملة (ممنوع الصمت)"
+                f"لم تُعَد شموع صالحة للزوج {symbol} على الإطار {self.timeframe}"
+            )
+        missing = {"timestamp", "close"} - set(candles.columns)
+        if missing:
+            raise CorrelationFeedError(
+                f"الزوج {symbol}: أعمدة مطلوبة مفقودة: {', '.join(sorted(missing))}"
             )
 
-        closes = candles["close"].iloc[-needed:]  # آخر النافذة المغلقة المطلوبة
-        if len(closes) < needed:
+        rows: list[tuple[pd.Timestamp, float]] = []
+        seen: set[pd.Timestamp] = set()
+        for index, (raw_timestamp, raw_close) in enumerate(
+            zip(candles["timestamp"], candles["close"])
+        ):
+            try:
+                timestamp = pd.Timestamp(raw_timestamp)
+                if pd.isna(timestamp) or timestamp.tzinfo is None:
+                    raise ValueError("التوقيت مفقود أو بلا منطقة زمنية")
+                timestamp = timestamp.tz_convert("UTC")
+                close = float(raw_close)
+            except (TypeError, ValueError, OverflowError) as error:
+                raise CorrelationFeedError(
+                    f"الزوج {symbol}: توقيت/إغلاق غير صالح عند الصف {index}: {error}"
+                ) from error
+
+            if timestamp in seen:
+                raise CorrelationFeedError(
+                    f"الزوج {symbol}: توقيت شمعة مكرر {timestamp.isoformat()}"
+                )
+            if rows and timestamp <= rows[-1][0]:
+                raise CorrelationFeedError(
+                    f"الزوج {symbol}: الشموع ليست مرتبة زمنياً عند {timestamp.isoformat()}"
+                )
+            if not math.isfinite(close) or close <= 0:
+                raise CorrelationFeedError(
+                    f"الزوج {symbol}: سعر إغلاق غير صالح ({raw_close})"
+                )
+            seen.add(timestamp)
+            rows.append((timestamp, close))
+
+        needed = self.lookback + 1
+        if len(rows) < needed:
             raise CorrelationFeedError(
                 f"الزوج {symbol}: يلزم {needed} شموع ({self.lookback}+1) لحساب DXY "
-                f"على الإطار {self.timeframe}، وصلنا {len(closes)} فقط "
+                f"على الإطار {self.timeframe}، وصلنا {len(rows)} فقط "
                 f"(طلبنا {fetch_count} شمعة من المصدر)"
             )
-
-        validated: list[float] = []
-        for close in closes:
-            value = float(close)
-            if value != value or value <= 0:  # NaN أو سعر غير منطقي
-                raise CorrelationFeedError(
-                    f"الزوج {symbol}: سعر إغلاق غير صالح ({close}) — لا يمكن حساب DXY"
-                )
-            validated.append(value)
-        return validated
+        return rows

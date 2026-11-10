@@ -331,3 +331,108 @@ def test_real_correlation_feed_with_flag_uses_same_price_feed_instance():
     assert result in ("up", "down", "flat"), "الاتجاه المُبلَّغ عنه غير منطقي على بيانات مرجعية مثبتة"
 
 
+
+
+def test_latest_candle_timestamps_must_match_across_all_pairs():
+    feed, stub = _make_feed(_base_closes())
+    original = stub.get_candles
+
+    def delayed_pair(symbol, timeframe, count):
+        frame = original(symbol, timeframe, count)
+        if symbol == "USDJPY":
+            frame["timestamp"] = frame["timestamp"] + pd.Timedelta(minutes=15)
+        return frame
+
+    stub.get_candles = delayed_pair
+    with pytest.raises(CorrelationFeedError, match="غير متزامن"):
+        feed.get_dollar_trend()
+
+
+def test_infinite_close_is_rejected():
+    feed, stub = _make_feed(_base_closes())
+    original = stub.get_candles
+
+    def infinite_pair(symbol, timeframe, count):
+        frame = original(symbol, timeframe, count)
+        if symbol == "USDCHF":
+            frame.loc[frame.index[-1], "close"] = float("inf")
+        return frame
+
+    stub.get_candles = infinite_pair
+    with pytest.raises(CorrelationFeedError, match="USDCHF"):
+        feed.get_dollar_trend()
+
+
+def test_duplicate_candle_timestamp_is_rejected():
+    feed, stub = _make_feed(_base_closes())
+    original = stub.get_candles
+
+    def duplicate_pair(symbol, timeframe, count):
+        frame = original(symbol, timeframe, count)
+        if symbol == "GBPUSD":
+            frame.loc[frame.index[-1], "timestamp"] = frame.loc[frame.index[-2], "timestamp"]
+        return frame
+
+    stub.get_candles = duplicate_pair
+    with pytest.raises(CorrelationFeedError, match="مكرر"):
+        feed.get_dollar_trend()
+
+
+def test_naive_candle_timestamp_is_rejected():
+    feed, stub = _make_feed(_base_closes())
+    original = stub.get_candles
+
+    def naive_pair(symbol, timeframe, count):
+        frame = original(symbol, timeframe, count)
+        if symbol == "USDCAD":
+            frame["timestamp"] = frame["timestamp"].dt.tz_localize(None)
+        return frame
+
+    stub.get_candles = naive_pair
+    with pytest.raises(CorrelationFeedError, match="بلا منطقة زمنية"):
+        feed.get_dollar_trend()
+
+
+def test_out_of_order_candles_are_rejected():
+    feed, stub = _make_feed(_base_closes())
+    original = stub.get_candles
+
+    def unordered_pair(symbol, timeframe, count):
+        frame = original(symbol, timeframe, count)
+        if symbol == "USDSEK":
+            frame = frame.iloc[::-1].reset_index(drop=True)
+        return frame
+
+    stub.get_candles = unordered_pair
+    with pytest.raises(CorrelationFeedError, match="ليست مرتبة"):
+        feed.get_dollar_trend()
+
+
+def test_gap_in_common_candle_timeline_is_rejected():
+    feed, stub = _make_feed(_base_closes(14))
+    original = stub.get_candles
+
+    def gap_pair(symbol, timeframe, count):
+        frame = original(symbol, timeframe, count)
+        if symbol == "EURUSD":
+            frame = frame.drop(index=8).reset_index(drop=True)
+        return frame
+
+    stub.get_candles = gap_pair
+    with pytest.raises(CorrelationFeedError, match="غير متوفرة لدى جميع الأزواج"):
+        feed.get_dollar_trend()
+
+
+def test_missing_timestamp_column_is_rejected():
+    feed, stub = _make_feed(_base_closes())
+    original = stub.get_candles
+
+    def no_timestamp(symbol, timeframe, count):
+        frame = original(symbol, timeframe, count)
+        if symbol == "USDCHF":
+            return frame.drop(columns=["timestamp"])
+        return frame
+
+    stub.get_candles = no_timestamp
+    with pytest.raises(CorrelationFeedError, match="timestamp"):
+        feed.get_dollar_trend()
