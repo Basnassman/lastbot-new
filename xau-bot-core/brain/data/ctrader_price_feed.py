@@ -27,9 +27,11 @@
 - ProtoHeartbeatEvent           : نبض دوري يمنع قطع الاتصال بسبب الخمول
 - ProtoOAGetTrendbarsReq/Res    : الشموع التاريخية (Trendbars)
 """
+import math
 import threading
 from collections.abc import Callable, Generator, Iterable
 from datetime import datetime, timedelta, timezone
+from numbers import Integral
 
 import pandas as pd
 from twisted.internet import reactor, defer
@@ -119,28 +121,128 @@ def _unwrap_response(response: object) -> object:
     return message
 
 
-def _trendbars_to_dataframe(trendbars: Iterable[object], digits: int) -> pd.DataFrame:
-    """تحوّل شموع cTrader (الصيغة النسبية) إلى DataFrame مطابق لعقد PriceFeed.
+def _trendbars_to_dataframe(
+    trendbars: Iterable[object],
+    digits: int,
+    timeframe: str,
+    now: datetime | None = None,
+) -> pd.DataFrame:
+    """تحوّل شموع cTrader إلى شموع مكتملة وصالحة وفق عقد PriceFeed.
 
-    cTrader يُرسل: low كسعر صحيح بوحدة 1/100000، وبقية الأسعار كفروق (deltas)
-    عن low. السعر الحقيقي = (low + delta) / 100000 مع التقريب إلى digits.
+    cTrader يُرسل low كسعر صحيح بوحدة 1/100000 وبقية الأسعار كفروق عنه.
+    لا نسمح بتمرير شمعة مشوهة أو مكررة أو ما زالت قيد التكوين إلى التحليل.
     """
-    rows = []
-    for trendbar in sorted(trendbars, key=lambda tb: tb.utcTimestampInMinutes):
-        low = int(trendbar.low)
+    if not isinstance(digits, Integral) or isinstance(digits, bool) or not 0 <= digits <= 8:
+        raise CTraderFeedError(f"عدد خانات السعر digits غير صالح: {digits!r}")
+    if timeframe not in _PERIOD_MINUTES:
+        raise CTraderFeedError(f"إطار زمني غير صالح لتحويل الشموع: {timeframe!r}")
+
+    current_time = now or datetime.now(timezone.utc)
+    if current_time.tzinfo is None or current_time.utcoffset() is None:
+        raise CTraderFeedError("الوقت المرجعي now يجب أن يحتوي على منطقة زمنية")
+    current_time = current_time.astimezone(timezone.utc)
+
+    try:
+        source_bars = list(trendbars)
+    except TypeError as error:
+        raise CTraderFeedError("استجابة cTrader للشموع ليست مجموعة قابلة للقراءة") from error
+    if not source_bars:
+        raise CTraderFeedError("استجابة cTrader لا تحتوي على شموع")
+
+    rows: list[dict[str, object]] = []
+    seen_timestamps: set[int] = set()
+    required_integer_fields = (
+        "utcTimestampInMinutes", "low", "deltaOpen", "deltaHigh", "deltaClose", "volume"
+    )
+
+    for index, trendbar in enumerate(source_bars):
+        values: dict[str, int] = {}
+        for field in required_integer_fields:
+            try:
+                has_field = getattr(trendbar, "HasField", None)
+                if callable(has_field) and field != "volume" and not has_field(field):
+                    raise CTraderFeedError(
+                        f"شمعة cTrader رقم {index} لا تحتوي الحقل البروتوكولي {field}"
+                    )
+                value = getattr(trendbar, field)
+            except CTraderFeedError:
+                raise
+            except (AttributeError, TypeError, ValueError) as error:
+                raise CTraderFeedError(
+                    f"شمعة cTrader رقم {index} تفتقد الحقل الإلزامي {field}"
+                ) from error
+            if not isinstance(value, Integral) or isinstance(value, bool):
+                raise CTraderFeedError(
+                    f"قيمة الحقل {field} غير صحيحة في الشمعة رقم {index}: {value!r}"
+                )
+            values[field] = int(value)
+
+        timestamp_minutes = values["utcTimestampInMinutes"]
+        if timestamp_minutes in seen_timestamps:
+            raise CTraderFeedError(
+                f"cTrader أعاد توقيت شمعة مكرراً: {timestamp_minutes} دقيقة UTC"
+            )
+        seen_timestamps.add(timestamp_minutes)
+        if timestamp_minutes < 0:
+            raise CTraderFeedError(f"توقيت شمعة سالب وغير صالح: {timestamp_minutes}")
+
+        if values["volume"] < 0:
+            raise CTraderFeedError(f"حجم تداول سالب في الشمعة رقم {index}")
+        for field in ("deltaOpen", "deltaHigh", "deltaClose"):
+            if values[field] < 0:
+                raise CTraderFeedError(
+                    f"فرق السعر {field} سالب في الشمعة رقم {index}؛ صيغة cTrader النسبية غير صالحة"
+                )
+
+        low_raw = values["low"]
+        low = low_raw / _PRICE_SCALE
+        open_price = (low_raw + values["deltaOpen"]) / _PRICE_SCALE
+        high = (low_raw + values["deltaHigh"]) / _PRICE_SCALE
+        close = (low_raw + values["deltaClose"]) / _PRICE_SCALE
+        prices = (open_price, high, low, close)
+        if not all(math.isfinite(price) for price in prices):
+            raise CTraderFeedError(f"سعر غير محدود أو غير صالح في الشمعة رقم {index}")
+        if high < max(open_price, close, low) or low > min(open_price, close):
+            raise CTraderFeedError(
+                f"قيم OHLC متناقضة في الشمعة رقم {index}: "
+                f"open={open_price}, high={high}, low={low}, close={close}"
+            )
+
+        try:
+            timestamp = datetime.fromtimestamp(timestamp_minutes * 60, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError) as error:
+            raise CTraderFeedError(
+                f"توقيت غير قابل للتحويل في الشمعة رقم {index}: {timestamp_minutes}"
+            ) from error
+        if timestamp > current_time:
+            raise CTraderFeedError(f"cTrader أعاد شمعة بتاريخ مستقبلي: {timestamp.isoformat()}")
+
         rows.append(
             {
-                "timestamp": datetime.fromtimestamp(
-                    int(trendbar.utcTimestampInMinutes) * 60, tz=timezone.utc
-                ),
-                "open": round((low + trendbar.deltaOpen) / _PRICE_SCALE, digits),
-                "high": round((low + trendbar.deltaHigh) / _PRICE_SCALE, digits),
-                "low": round(low / _PRICE_SCALE, digits),
-                "close": round((low + trendbar.deltaClose) / _PRICE_SCALE, digits),
-                "volume": int(trendbar.volume),
+                "timestamp": timestamp,
+                "open": round(open_price, int(digits)),
+                "high": round(high, int(digits)),
+                "low": round(low, int(digits)),
+                "close": round(close, int(digits)),
+                "volume": values["volume"],
             }
         )
-    return pd.DataFrame(rows)
+
+    # الترتيب النهائي مضمون حتى لو أعاد الخادم الشموع بترتيب عكسي.
+    rows.sort(key=lambda row: row["timestamp"])
+    candle_duration = timedelta(minutes=_PERIOD_MINUTES[timeframe])
+    completed_rows = [
+        row for row in rows if row["timestamp"] + candle_duration <= current_time
+    ]
+    if not completed_rows:
+        raise CTraderFeedError(
+            f"لا توجد شموع مكتملة بعد استبعاد الشمعة المفتوحة على الإطار {timeframe}"
+        )
+
+    return pd.DataFrame(
+        completed_rows,
+        columns=["timestamp", "open", "high", "low", "close", "volume"],
+    ).reset_index(drop=True)
 
 
 def _ensure_reactor_running() -> None:
@@ -293,7 +395,9 @@ class _Session:
         request.ctidTraderAccountId = self.account_id
         request.period = period
         request.symbolId = symbol_id
-        request.count = count
+        # نطلب شمعة إضافية لأن الاستجابة قد تتضمن الشمعة الحالية غير المكتملة؛
+        # التحويل أدناه يستبعدها قبل تسليم البيانات إلى Brain.
+        request.count = count + 1
         request.fromTimestamp = from_timestamp
         request.toTimestamp = to_timestamp
 
@@ -304,7 +408,8 @@ class _Session:
                 f"لم يُعد cTrader أي شموع للرمز {symbol} على الإطار {timeframe} — "
                 "قد يكون السوق مغلقاً أو البيانات التاريخية غير متاحة من الوسيط"
             )
-        return _trendbars_to_dataframe(response.trendbar, digits)
+        candles = _trendbars_to_dataframe(response.trendbar, digits, timeframe)
+        return candles.tail(count).reset_index(drop=True)
 
     @defer.inlineCallbacks
     def _ensure_symbol_on_reactor(self, symbol: str) -> Generator[defer.Deferred, object, tuple[int, int]]:
@@ -410,8 +515,10 @@ class CTraderPriceFeed(PriceFeed):
             raise CTraderFeedError(
                 f"الإطار الزمني '{timeframe}' غير مدعوم — المدعوم: {sorted(_TIMEFRAME_TO_PERIOD)}"
             )
-        if count <= 0:
-            raise CTraderFeedError(f"count يجب أن يكون موجباً، حصلنا على: {count}")
+        if not isinstance(count, Integral) or isinstance(count, bool) or count <= 0:
+            raise CTraderFeedError(f"count يجب أن يكون عدداً صحيحاً موجباً، حصلنا على: {count!r}")
+        if count >= 4_294_967_295:
+            raise CTraderFeedError("count أكبر من الحد الذي يدعمه حقل cTrader uint32")
 
         session = self._get_session()
         try:

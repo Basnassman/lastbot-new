@@ -420,6 +420,7 @@ def fake_feed_factory(monkeypatch):
         state["trendbars"] = trendbars
         return feed_module.CTraderPriceFeed()
 
+    make.state = state
     yield make
 
     # استعادة sys.modules الأصلية (سلامة بقية الاختبارات)
@@ -487,6 +488,150 @@ def test_candles_sorted_oldest_to_newest_and_prices_decoded(fake_feed_factory):
     # التقريب إلى خانات الرمز (digits=2 مثل الذهب في معظم وسطاء cTrader)
     for column in ["open", "high", "low", "close"]:
         assert (df[column].round(2) == df[column]).all()
+
+
+def _raw_bar(timestamp, *, low=265000000, open_delta=0, high_delta=20000, close_delta=10000, volume=100):
+    return types.SimpleNamespace(
+        utcTimestampInMinutes=timestamp,
+        low=low,
+        deltaOpen=open_delta,
+        deltaHigh=high_delta,
+        deltaClose=close_delta,
+        volume=volume,
+    )
+
+
+def test_converter_rejects_duplicate_timestamps(fake_feed_factory):
+    fake_feed_factory([])
+    import brain.data.ctrader_price_feed as feed_module
+
+    now = datetime(2024, 1, 1, 12, 30, tzinfo=timezone.utc)
+    timestamp = int((now - timedelta(minutes=30)).timestamp() // 60)
+    with pytest.raises(feed_module.CTraderFeedError, match="مكرراً"):
+        feed_module._trendbars_to_dataframe(
+            [_raw_bar(timestamp), _raw_bar(timestamp)], 2, "M15", now=now
+        )
+
+
+def test_converter_rejects_invalid_ohlc_relationship(fake_feed_factory):
+    fake_feed_factory([])
+    import brain.data.ctrader_price_feed as feed_module
+
+    now = datetime(2024, 1, 1, 12, 30, tzinfo=timezone.utc)
+    timestamp = int((now - timedelta(minutes=30)).timestamp() // 60)
+    # high=2650.10 بينما close=2650.20
+    with pytest.raises(feed_module.CTraderFeedError, match="OHLC متناقضة"):
+        feed_module._trendbars_to_dataframe(
+            [_raw_bar(timestamp, high_delta=10000, close_delta=20000)],
+            2,
+            "M15",
+            now=now,
+        )
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        ({"volume": -1}, "حجم تداول سالب"),
+        ({"open_delta": -1}, "deltaOpen سالب"),
+        ({"high_delta": float("nan")}, "deltaHigh غير صحيحة"),
+        ({"close_delta": 1.5}, "deltaClose غير صحيحة"),
+    ],
+)
+def test_converter_rejects_invalid_raw_values(fake_feed_factory, overrides, message):
+    fake_feed_factory([])
+    import brain.data.ctrader_price_feed as feed_module
+
+    now = datetime(2024, 1, 1, 12, 30, tzinfo=timezone.utc)
+    timestamp = int((now - timedelta(minutes=30)).timestamp() // 60)
+    with pytest.raises(feed_module.CTraderFeedError, match=message):
+        feed_module._trendbars_to_dataframe(
+            [_raw_bar(timestamp, **overrides)], 2, "M15", now=now
+        )
+
+
+def test_converter_excludes_forming_candle_and_sorts_completed_bars(fake_feed_factory):
+    fake_feed_factory([])
+    import brain.data.ctrader_price_feed as feed_module
+
+    now = datetime(2024, 1, 1, 12, 29, tzinfo=timezone.utc)
+    current_start = int(datetime(2024, 1, 1, 12, 15, tzinfo=timezone.utc).timestamp() // 60)
+    previous_start = current_start - 15
+    df = feed_module._trendbars_to_dataframe(
+        [_raw_bar(current_start), _raw_bar(previous_start)],
+        2,
+        "M15",
+        now=now,
+    )
+
+    assert len(df) == 1
+    assert df.iloc[0]["timestamp"] == datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
+
+
+def test_converter_rejects_unset_optional_protobuf_price_field(fake_feed_factory):
+    fake_feed_factory([])
+    import brain.data.ctrader_price_feed as feed_module
+
+    now = datetime(2024, 1, 1, 12, 30, tzinfo=timezone.utc)
+    timestamp = int((now - timedelta(minutes=30)).timestamp() // 60)
+    bar = _raw_bar(timestamp)
+    bar.HasField = lambda field: field != "deltaOpen"
+
+    with pytest.raises(feed_module.CTraderFeedError, match="لا تحتوي الحقل البروتوكولي deltaOpen"):
+        feed_module._trendbars_to_dataframe([bar], 2, "M15", now=now)
+
+
+def test_converter_rejects_future_candle_timestamp(fake_feed_factory):
+    fake_feed_factory([])
+    import brain.data.ctrader_price_feed as feed_module
+
+    now = datetime(2024, 1, 1, 12, 30, tzinfo=timezone.utc)
+    future = int(datetime(2024, 1, 1, 12, 31, tzinfo=timezone.utc).timestamp() // 60)
+    with pytest.raises(feed_module.CTraderFeedError, match="تاريخ مستقبلي"):
+        feed_module._trendbars_to_dataframe([_raw_bar(future)], 2, "M15", now=now)
+
+
+def test_converter_rejects_naive_reference_time(fake_feed_factory):
+    fake_feed_factory([])
+    import brain.data.ctrader_price_feed as feed_module
+
+    with pytest.raises(feed_module.CTraderFeedError, match="منطقة زمنية"):
+        feed_module._trendbars_to_dataframe(
+            [_raw_bar(28401120)], 2, "M15", now=datetime(2024, 1, 1, 12, 30)
+        )
+
+
+def test_converter_rejects_response_with_only_an_open_candle(fake_feed_factory):
+    fake_feed_factory([])
+    import brain.data.ctrader_price_feed as feed_module
+
+    now = datetime(2024, 1, 1, 12, 29, tzinfo=timezone.utc)
+    forming_start = int(datetime(2024, 1, 1, 12, 15, tzinfo=timezone.utc).timestamp() // 60)
+    with pytest.raises(feed_module.CTraderFeedError, match="لا توجد شموع مكتملة"):
+        feed_module._trendbars_to_dataframe(
+            [_raw_bar(forming_start)], 2, "M15", now=now
+        )
+
+
+def test_get_candles_requests_one_extra_bar_and_returns_requested_count(fake_feed_factory):
+    count = 3
+    factory = fake_feed_factory
+    feed = factory(_make_relative_trendbars(count + 1, 15))
+    df = feed.get_candles("XAUUSD", "M15", count)
+
+    requests = [message for message in factory.state["sent"] if type(message).__name__ == "ProtoOAGetTrendbarsReq"]
+    assert len(requests) == 1
+    assert requests[0].count == count + 1
+    assert len(df) == count
+    assert df["timestamp"].is_monotonic_increasing
+
+
+@pytest.mark.parametrize("count", [0, -1, 1.5, True, "10", 4_294_967_295])
+def test_get_candles_rejects_invalid_count_without_opening_session(fake_feed_factory, count):
+    feed = fake_feed_factory([])
+    with pytest.raises(Exception, match="count"):
+        feed.get_candles("XAUUSD", "M15", count)
+    assert feed._session is None
 
 
 def test_empty_trendbars_raises_loudly(fake_feed_factory):
