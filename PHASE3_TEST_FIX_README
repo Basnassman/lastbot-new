@@ -1,0 +1,16 @@
+Phase 3 test-isolation fix
+
+Replace only:
+  xau-bot-core/tests/test_real_correlation_feed.py
+
+Reason:
+The old assertion inspected all of sys.modules, so it failed when another test
+had already imported twisted or ctrader_open_api. The revised test blocks those
+imports only while _build_correlation_feed() runs. It therefore tests whether
+the code under test attempts an import, without depending on test execution order.
+
+Verified in the supplied repository snapshot with the Phase 3 patch overlaid:
+  pytest -q tests/test_real_correlation_feed.py -> 23 passed
+  pytest -q -> 245 passed
+
+No production code, trading logic, thresholds, risk settings, or cBot files changed.

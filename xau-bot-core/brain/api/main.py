@@ -23,7 +23,6 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from brain.data.mock_price_feed import MockCorrelationFeed, MockNewsFeed, MockPriceFeed
-from brain.data.real_correlation_feed import RealCorrelationFeed
 from brain.decision_engine import DecisionEngine, FinalDecision
 from brain.risk.risk_manager import RiskManager
 from brain.risk.trade_result_store import TradeResultStore
@@ -111,6 +110,9 @@ def decide(symbol: str = "XAUUSD", timeframe: str = "M15") -> dict:
         # سياق إضافي فقط (المرحلة 1): لا يغيّر أي حقل أعلاه ولا أي سلوك تنفيذي.
         # None عند تعطيل الميزة؛ يبقى ظاهراً دائماً بمفتاح ثابت لتوافق المستدعين.
         "market_structure": decision.market_structure,
+        "data_snapshot_id": decision.data_snapshot_id,
+        "price_data_as_of_utc": decision.price_data_as_of_utc,
+        "dollar_trend_debug": decision.dollar_trend_debug,
     }
 
 
@@ -123,12 +125,9 @@ def decide_log_only(symbol: str = "XAUUSD", timeframe: str = "M15") -> dict:
     لا اتصال بأي Order/Execution API من هنا أو من أي مسار آخر.
     """
     decision: FinalDecision = _engine.decide(symbol=symbol, timeframe=timeframe)
-    dollar_debug: dict | None = None
-    correlation = getattr(_engine, "correlation_feed", None)
-    # حقل تشخيصي إضافي فقط للمحقق: لا يغيّر action أو position_size_usd أو أي
-    # سلوك تنفيذي، ويبقى null عندما CorrelationFeed المعطل هو Mock (المهمة القديم).
-    if correlation is not None and isinstance(correlation, RealCorrelationFeed):
-        dollar_debug = correlation.get_dollar_trend_details()
+    # التشخيص يأتي من نفس نتيجة DXY التي استخدمها DecisionEngine للتصويت؛
+    # ممنوع إعادة جلب الأزواج بعد صدور القرار حتى لا تختلف اللقطة.
+    dollar_debug = decision.dollar_trend_debug
     return {
         "mode": "log-only",
         "action": decision.action,
@@ -139,6 +138,8 @@ def decide_log_only(symbol: str = "XAUUSD", timeframe: str = "M15") -> dict:
         # سياق إضافي فقط (المرحلة 1): الـcBot يتجاهل أي حقل لا يعرفه (System.Text.Json)،
         # فإضافته هنا لا تكسر أي مستدعٍ قائم — ويُثبَت ذلك فعلياً عبر الـharness.
         "market_structure": decision.market_structure,
+        "data_snapshot_id": decision.data_snapshot_id,
+        "price_data_as_of_utc": decision.price_data_as_of_utc,
     }
 
 

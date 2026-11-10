@@ -1,0 +1,27 @@
+Phase 3 - Brain/cBot data-snapshot integrity patch
+
+Replace the files in your repository using the paths preserved in this archive:
+- xau-bot-core/brain/data/real_correlation_feed.py
+- xau-bot-core/brain/decision_engine.py
+- xau-bot-core/brain/api/main.py
+- xau-bot-core/tests/test_phase3_snapshot_integrity.py (new test file)
+- executor/XauBotExecutor/XauBotExecutor.cs
+- executor/harness/ExecutorHarness/Program.cs
+
+What changed:
+1. DecisionEngine obtains the detailed DXY snapshot once and uses its trend for scoring.
+2. The exact DXY snapshot used for scoring is passed into the API response; no second DXY fetch is performed for diagnostics.
+3. Each decision receives a data_snapshot_id and the latest XAU candle timestamp.
+4. The DXY snapshot carries its latest common FX candle timestamp. For real DXY snapshots, Brain rejects missing or non-matching XAU/DXY candle timestamps.
+5. cBot validates the response contract, snapshot ID, timestamps, DXY trend, and matching snapshot identity before accepting the response. Invalid responses are rejected before reaching the existing execution path.
+6. The harness fixture now supplies the new required metadata.
+
+No changes were made to strategy/scoring weights, DECISION_SCORE_THRESHOLD, RiskManager, position sizing, SL/TP, order execution conditions, or deployment configuration.
+
+Verification performed in the provided environment:
+- Phase 3 + correlation + cTrader price-feed + RSI targeted tests: 118 passed.
+- Full Python suite excluding the known sys.modules isolation test: 244 passed, 1 deselected.
+- Full suite: 244 passed, 1 failed. The sole failure is the pre-existing test_real_correlation_feed_with_flag_uses_same_price_feed_instance, which passes when run alone and fails in the full suite because twisted/ctrader_open_api are already present in sys.modules. This unrelated suite-isolation issue was not changed.
+- C# harness was not compiled or run: .NET SDK/runtime is unavailable in this environment.
+
+Important: This is a source patch only. It has not been deployed, committed, pushed, or run against a broker.

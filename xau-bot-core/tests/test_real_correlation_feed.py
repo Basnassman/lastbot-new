@@ -22,6 +22,7 @@
     القيمة متسقة مع مستوى DXY الرسمي في أسبوع القمة 27–28 سبتمبر 2022 (114+ عند
     الذروة) ضمن دقة اقتباسات اليوم المذكورة أعلاه — فرق مقبول بحكم تقريب الاقتباسات.
 """
+import builtins
 import inspect
 import os
 import sys
@@ -316,16 +317,24 @@ def test_real_correlation_feed_with_flag_uses_same_price_feed_instance():
             "true" if key == "USE_REAL_CORRELATION_FEED" else os.environ.get(key, default)
         )):
             stub = _StubPriceFeed(_base_closes(11))
-            feed = main_module._build_correlation_feed(price_feed=stub)
+
+            # افحص محاولة الاستيراد أثناء بناء المصدر، لا حالة sys.modules العامة؛
+            # فقد تكون مكتبات الوسيط محمّلة مسبقاً بواسطة اختبارات أخرى في العملية.
+            original_import = builtins.__import__
+            blocked_prefixes = ("ctrader_open_api", "twisted")
+
+            def guarded_import(name, *args, **kwargs):
+                if any(name == prefix or name.startswith(prefix + ".") for prefix in blocked_prefixes):
+                    raise AssertionError(
+                        f"تمت محاولة استيراد مكتبة وسيط أثناء بناء CorrelationFeed: {name}"
+                    )
+                return original_import(name, *args, **kwargs)
+
+            with unittest_mock.patch.object(builtins, "__import__", side_effect=guarded_import):
+                feed = main_module._build_correlation_feed(price_feed=stub)
 
     assert isinstance(feed, RealCorrelationFeed), "التفعيل الحقيقي لم ينتج RealCorrelationFeed"
     assert feed._price_feed is stub, "يُنشئ RealCorrelationFeed مبداً جديداً منفصلاً عن price_feed المُستخدم فعلاً"
-
-    # إثبات أن مصدر cTrader لم يُستدعَ فعلياً في هذا الاختبار (بديل memory-only فقط)
-    assert not any(
-        name.startswith("ctrader_open_api") or name.startswith("twisted")
-        for name in sys.modules
-    ), "استدعاء مكتبة الوسيط داخل process_start_without_real_feed()"
 
     result = feed.get_dollar_trend()
     assert result in ("up", "down", "flat"), "الاتجاه المُبلَّغ عنه غير منطقي على بيانات مرجعية مثبتة"

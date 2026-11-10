@@ -5,7 +5,9 @@
 بقية المكوّنات الداخلية لا يجب أن تُستدعى مباشرة من خارج هذا الملف —
 هذا يحافظ على وضوح نقطة الدخول الواحدة ويمنع التعقيد المبعثر.
 """
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, is_dataclass
+from datetime import datetime, timezone
+from uuid import uuid4
 
 from brain.analysis.environment_filter import check_environment
 from brain.analysis.indicators import atr
@@ -28,6 +30,10 @@ class FinalDecision:
     # حقل اختياري بقيمة افتراضية None — أي مستدعٍ أو بناء قديم يبقى صالحاً دون
     # تعديل، والقرار (action/position_size_usd/confidence) لا يعتمد عليه إطلاقاً.
     market_structure: dict | None = None
+    # معرّف واحد يربط القرار وبياناته التشخيصية في دورة واحدة.
+    data_snapshot_id: str | None = None
+    price_data_as_of_utc: str | None = None
+    dollar_trend_debug: dict | None = None
 
 
 class DecisionEngine:
@@ -45,6 +51,9 @@ class DecisionEngine:
 
     def decide(self, symbol: str = "XAUUSD", timeframe: str = "M15") -> FinalDecision:
         candles = self.price_feed.get_candles(symbol, timeframe, count=100)
+        data_snapshot_id = uuid4().hex
+        price_data_as_of_utc = self._latest_candle_timestamp(candles)
+        dollar_trend_debug: dict | None = None
         all_reasons: list[str] = []
 
         # المرحلة 1 (إضافية، لا تغيّر القرار): تحليل البنية السوقية من نفس الشموع
@@ -60,6 +69,8 @@ class DecisionEngine:
             decision = FinalDecision(
                 action="none", position_size_usd=0.0, confidence=0.0, reasons=all_reasons,
                 market_structure=market_structure,
+                data_snapshot_id=data_snapshot_id,
+                price_data_as_of_utc=price_data_as_of_utc,
             )
             self._log(decision, stage_stopped="environment_filter")
             return decision
@@ -69,7 +80,24 @@ class DecisionEngine:
         all_reasons.append(f"النظام الحالي: {regime.regime}")
 
         # المرحلة 3: التصويت المرجّح
-        dollar_trend = self.correlation_feed.get_dollar_trend()
+        # إن كان المصدر يوفر التفاصيل، نجلبها مرة واحدة ونستخرج منها الاتجاه
+        # نفسه الذي سيُستخدم في التصويت؛ لا نعيد جلب DXY لأغراض التشخيص.
+        get_details = getattr(self.correlation_feed, "get_dollar_trend_details", None)
+        if callable(get_details):
+            dxy_snapshot = get_details()
+            dollar_trend = dxy_snapshot.trend
+            if is_dataclass(dxy_snapshot):
+                dollar_trend_debug = asdict(dxy_snapshot)
+            elif isinstance(dxy_snapshot, dict):
+                dollar_trend_debug = dict(dxy_snapshot)
+            else:
+                raise TypeError("get_dollar_trend_details يجب أن يعيد dataclass أو dict")
+            dollar_trend_debug["data_snapshot_id"] = data_snapshot_id
+            self._validate_aligned_data_timestamps(
+                price_data_as_of_utc, dollar_trend_debug.get("as_of_utc")
+            )
+        else:
+            dollar_trend = self.correlation_feed.get_dollar_trend()
         scoring = compute_score(candles, regime, dollar_trend)
         all_reasons.extend(scoring.reasons)
         all_reasons.append(f"النتيجة النهائية: {scoring.final_score:.1f} (اتجاه={scoring.direction})")
@@ -78,6 +106,9 @@ class DecisionEngine:
             decision = FinalDecision(
                 action="none", position_size_usd=0.0, confidence=scoring.confidence, reasons=all_reasons,
                 market_structure=market_structure,
+                data_snapshot_id=data_snapshot_id,
+                price_data_as_of_utc=price_data_as_of_utc,
+                dollar_trend_debug=dollar_trend_debug,
             )
             self._log(decision, stage_stopped="weighted_voting")
             return decision
@@ -91,6 +122,9 @@ class DecisionEngine:
             decision = FinalDecision(
                 action="none", position_size_usd=0.0, confidence=scoring.confidence, reasons=all_reasons,
                 market_structure=market_structure,
+                data_snapshot_id=data_snapshot_id,
+                price_data_as_of_utc=price_data_as_of_utc,
+                dollar_trend_debug=dollar_trend_debug,
             )
             self._log(decision, stage_stopped="risk_manager")
             return decision
@@ -101,9 +135,46 @@ class DecisionEngine:
             confidence=scoring.confidence,
             reasons=all_reasons,
             market_structure=market_structure,
+            data_snapshot_id=data_snapshot_id,
+            price_data_as_of_utc=price_data_as_of_utc,
+            dollar_trend_debug=dollar_trend_debug,
         )
         self._log(decision, stage_stopped=None)
         return decision
+
+    @staticmethod
+    def _validate_aligned_data_timestamps(
+        price_timestamp: str | None, dollar_timestamp: str | None
+    ) -> None:
+        """يرفض لقطة DXY إذا لم تتطابق شمعتها الأخيرة مع شمعة الذهب المستخدمة."""
+        if not price_timestamp or not dollar_timestamp:
+            raise ValueError("توقيت شمعة الذهب أو DXY مفقود؛ رُفضت لقطة البيانات")
+        try:
+            price_dt = datetime.fromisoformat(price_timestamp.replace("Z", "+00:00"))
+            dollar_dt = datetime.fromisoformat(dollar_timestamp.replace("Z", "+00:00"))
+            if price_dt.tzinfo is None or dollar_dt.tzinfo is None:
+                raise ValueError("التوقيت يجب أن يحتوي على منطقة زمنية")
+            price_dt = price_dt.astimezone(timezone.utc)
+            dollar_dt = dollar_dt.astimezone(timezone.utc)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError(f"توقيت لقطة البيانات غير صالح: {error}") from error
+        if price_dt != dollar_dt:
+            raise ValueError(
+                "توقيت آخر شمعة للذهب لا يطابق توقيت DXY: "
+                f"XAU={price_dt.isoformat()}, DXY={dollar_dt.isoformat()}"
+            )
+
+    @staticmethod
+    def _latest_candle_timestamp(candles) -> str | None:
+        """يعيد توقيت آخر شمعة مستخدمة دون التأثير على مسار القرار."""
+        try:
+            value = candles.iloc[-1]["timestamp"]
+            timestamp = value.to_pydatetime() if hasattr(value, "to_pydatetime") else value
+            if getattr(timestamp, "tzinfo", None) is None:
+                return None
+            return timestamp.astimezone(timezone.utc).isoformat()
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+            return None
 
     @staticmethod
     def _analyze_market_structure(candles, timeframe: str) -> dict | None:

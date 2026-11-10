@@ -394,6 +394,15 @@ namespace cAlgo.Robots
                 return;
             }
 
+            string validationError;
+            if (!TryValidateBrainDecisionPayload(response.Body, out validationError))
+            {
+                _failureCount++;
+                Print($"{LogPrefix} ⚠️ استجابة Brain API لا تطابق عقد البيانات: {validationError}");
+                Print($"{LogPrefix}    ستُرفض هذه الاستجابة ولن تُمرر إلى مسار التنفيذ.");
+                return;
+            }
+
             BrainDecision decision;
             try
             {
@@ -429,6 +438,8 @@ namespace cAlgo.Robots
             Print($"{LogPrefix} ✅ قرار مُستلَم (نجاح #{_successCount}) | mode={d.Mode} | " +
                   $"action={d.Action} | confidence={Fmt(d.Confidence)} | " +
                   $"position_size_usd={Fmt(d.PositionSizeUsd)}");
+            Print($"{LogPrefix}    data_snapshot_id={d.DataSnapshotId} | " +
+                  $"price_data_as_of_utc={d.PriceDataAsOfUtc}");
 
             if (d.Reasons != null && d.Reasons.Count > 0)
             {
@@ -1963,6 +1974,148 @@ namespace cAlgo.Robots
 
             [JsonPropertyName("dollar_trend_debug")]
             public JsonElement? DollarTrendDebug { get; set; }
+
+            [JsonPropertyName("data_snapshot_id")]
+            public string DataSnapshotId { get; set; }
+
+            [JsonPropertyName("price_data_as_of_utc")]
+            public string PriceDataAsOfUtc { get; set; }
+        }
+
+        // تحقق من عقد البيانات قبل زيادة عداد النجاح أو تمرير أي قرار إلى التنفيذ.
+        // هذا تحقق بنيوي فقط؛ لا يغيّر شروط التداول أو حجم الصفقة.
+        private static bool TryValidateBrainDecisionPayload(string json, out string error)
+        {
+            error = null;
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                error = "استجابة JSON فارغة";
+                return false;
+            }
+            try
+            {
+                using (var document = JsonDocument.Parse(json))
+                {
+                    var root = document.RootElement;
+                    if (root.ValueKind != JsonValueKind.Object)
+                    {
+                        error = "الجذر ليس JSON object";
+                        return false;
+                    }
+
+                    if (!root.TryGetProperty("mode", out var mode) ||
+                        mode.ValueKind != JsonValueKind.String || mode.GetString() != "log-only")
+                    {
+                        error = "mode مفقود أو ليس log-only";
+                        return false;
+                    }
+
+                    if (!root.TryGetProperty("action", out var action) || action.ValueKind != JsonValueKind.String)
+                    {
+                        error = "action مفقود أو ليس نصاً";
+                        return false;
+                    }
+                    var actionValue = action.GetString();
+                    if (actionValue != "buy" && actionValue != "sell" && actionValue != "none")
+                    {
+                        error = "action خارج القيم المسموحة";
+                        return false;
+                    }
+
+                    if (!root.TryGetProperty("position_size_usd", out var size) ||
+                        size.ValueKind != JsonValueKind.Number || !size.TryGetDouble(out var sizeValue) ||
+                        double.IsNaN(sizeValue) || double.IsInfinity(sizeValue) || sizeValue < 0)
+                    {
+                        error = "position_size_usd مفقود أو غير صالح";
+                        return false;
+                    }
+
+                    if (!root.TryGetProperty("confidence", out var confidence) ||
+                        confidence.ValueKind != JsonValueKind.Number || !confidence.TryGetDouble(out var confidenceValue) ||
+                        double.IsNaN(confidenceValue) || double.IsInfinity(confidenceValue))
+                    {
+                        error = "confidence مفقود أو غير صالح";
+                        return false;
+                    }
+
+                    if (!root.TryGetProperty("reasons", out var reasons) || reasons.ValueKind != JsonValueKind.Array)
+                    {
+                        error = "reasons مفقود أو ليس array";
+                        return false;
+                    }
+                    foreach (var reason in reasons.EnumerateArray())
+                    {
+                        if (reason.ValueKind != JsonValueKind.String)
+                        {
+                            error = "reasons يحتوي عنصراً ليس نصاً";
+                            return false;
+                        }
+                    }
+
+                    if (!root.TryGetProperty("data_snapshot_id", out var snapshotId) ||
+                        snapshotId.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(snapshotId.GetString()))
+                    {
+                        error = "data_snapshot_id مفقود";
+                        return false;
+                    }
+
+                    if (!root.TryGetProperty("price_data_as_of_utc", out var priceTimestamp) ||
+                        priceTimestamp.ValueKind != JsonValueKind.String ||
+                        !DateTimeOffset.TryParse(priceTimestamp.GetString(), CultureInfo.InvariantCulture,
+                            DateTimeStyles.None, out var priceDataTimestamp))
+                    {
+                        error = "price_data_as_of_utc مفقود أو غير صالح";
+                        return false;
+                    }
+
+                    if (root.TryGetProperty("dollar_trend_debug", out var dollarDebug) &&
+                        dollarDebug.ValueKind != JsonValueKind.Null && dollarDebug.ValueKind != JsonValueKind.Object)
+                    {
+                        error = "dollar_trend_debug يجب أن يكون object أو null";
+                        return false;
+                    }
+
+                    if (dollarDebug.ValueKind == JsonValueKind.Object)
+                    {
+                        if (!dollarDebug.TryGetProperty("data_snapshot_id", out var debugSnapshotId) ||
+                            debugSnapshotId.ValueKind != JsonValueKind.String ||
+                            debugSnapshotId.GetString() != snapshotId.GetString())
+                        {
+                            error = "معرّف لقطة DXY مفقود أو لا يطابق معرّف القرار";
+                            return false;
+                        }
+
+                        if (!dollarDebug.TryGetProperty("trend", out var trend) ||
+                            trend.ValueKind != JsonValueKind.String ||
+                            (trend.GetString() != "up" && trend.GetString() != "down" && trend.GetString() != "flat"))
+                        {
+                            error = "اتجاه DXY مفقود أو غير صالح";
+                            return false;
+                        }
+
+                        if (!dollarDebug.TryGetProperty("as_of_utc", out var dxyTimestamp) ||
+                            dxyTimestamp.ValueKind != JsonValueKind.String ||
+                            !DateTimeOffset.TryParse(dxyTimestamp.GetString(), CultureInfo.InvariantCulture,
+                                DateTimeStyles.None, out var dxyDataTimestamp))
+                        {
+                            error = "توقيت لقطة DXY مفقود أو غير صالح";
+                            return false;
+                        }
+
+                        if (dxyDataTimestamp != priceDataTimestamp)
+                        {
+                            error = "توقيت شمعة الذهب لا يطابق توقيت لقطة DXY";
+                            return false;
+                        }
+                    }
+                }
+                return true;
+            }
+            catch (JsonException)
+            {
+                error = "JSON غير صالح";
+                return false;
+            }
         }
     }
 }

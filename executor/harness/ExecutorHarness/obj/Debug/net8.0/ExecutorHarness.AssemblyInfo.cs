@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("ExecutorHarness")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+a0882a7b114a3d58b8fa804c33976ffece17337f")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+1a87ae813480d39053545612357c04c9f4fa89c7")]
 [assembly: System.Reflection.AssemblyProductAttribute("ExecutorHarness")]
 [assembly: System.Reflection.AssemblyTitleAttribute("ExecutorHarness")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

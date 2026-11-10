@@ -412,7 +412,8 @@ namespace ExecutorHarness
             return string.Format(
                 CultureInfo.InvariantCulture,
                 "{{\"mode\":\"log-only\",\"action\":\"{0}\",\"position_size_usd\":{1},\"confidence\":{2}," +
-                "\"reasons\":[\"harness\"],\"dollar_trend_debug\":null}}",
+                "\"reasons\":[\"harness\"],\"dollar_trend_debug\":null," +
+                "\"data_snapshot_id\":\"harness-snapshot\",\"price_data_as_of_utc\":\"2026-11-10T00:00:00+00:00\"}}",
                 action,
                 sizeUsd.ToString("R", CultureInfo.InvariantCulture),
                 confidence.ToString("R", CultureInfo.InvariantCulture));

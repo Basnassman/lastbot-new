@@ -80,6 +80,7 @@ class DxySnapshot:
     change: float         # current - previous
     threshold: float      # عتبة flat المستخدمة
     trend: str            # "up" | "down" | "flat"
+    as_of_utc: str        # آخر توقيت مشترك بين الأزواج الستة
 
 
 class RealCorrelationFeed(CorrelationFeed):
@@ -111,7 +112,7 @@ class RealCorrelationFeed(CorrelationFeed):
 
     def get_dollar_trend_details(self) -> DxySnapshot:
         """القياس الكامل (القيمتان والتغير والتصنيف) — يُستخدم للتشخيص والتوثيق."""
-        current_prices, previous_prices = self._fetch_current_and_previous_prices()
+        current_prices, previous_prices, as_of_utc = self._fetch_current_and_previous_prices()
         current_dxy = compute_dxy_value(current_prices)
         previous_dxy = compute_dxy_value(previous_prices)
         change = current_dxy - previous_dxy
@@ -129,11 +130,14 @@ class RealCorrelationFeed(CorrelationFeed):
             change=change,
             threshold=self.flat_threshold,
             trend=trend,
+            as_of_utc=as_of_utc.isoformat(),
         )
 
     # --- الداخلية ---
 
-    def _fetch_current_and_previous_prices(self) -> tuple[dict[str, float], dict[str, float]]:
+    def _fetch_current_and_previous_prices(
+        self,
+    ) -> tuple[dict[str, float], dict[str, float], pd.Timestamp]:
         """يجلب نافذة مشتركة زمنياً للأزواج الستة، ثم يعيد نقطتي المقارنة."""
         needed = self.lookback + 1
         pair_candles: dict[str, dict[pd.Timestamp, float]] = {}
@@ -176,7 +180,7 @@ class RealCorrelationFeed(CorrelationFeed):
 
         current = {symbol: rows[selected_times[-1]] for symbol, rows in pair_candles.items()}
         previous = {symbol: rows[selected_times[0]] for symbol, rows in pair_candles.items()}
-        return current, previous
+        return current, previous, selected_times[-1]
 
     def _fetch_pair_closes(
         self, symbol: str, fetch_count: int
